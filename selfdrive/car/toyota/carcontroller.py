@@ -170,8 +170,8 @@ class CarController(CarControllerBase):
                                     int(CS.secoc_synchronization['RESET_CNT']),
                                     self.secoc_lta_message_counter,
                                     lta_steer_2)
-      self.secoc_lta_message_counter += 1
-      can_sends.append(lta_steer_2)
+        self.secoc_lta_message_counter += 1
+        can_sends.append(lta_steer_2)
 
     # *** gas and brake ***
     if self.CP.enableGasInterceptor and CC.longActive and self.CP.carFingerprint not in STOP_AND_GO_CAR:
