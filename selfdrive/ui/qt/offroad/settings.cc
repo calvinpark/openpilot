@@ -391,12 +391,6 @@ AlesatoPanel::AlesatoPanel(SettingsWindow *parent) : ListWidget(parent) {
       tr("Use neutral force and a alternative acceleration command for gain PCM compensation forces and mess with permiting brake bit."),
       "../assets/offroad/icon_settings.png",
     },
-    {
-      "AleSato_ForceRaiseAccLimits",
-      tr("Raise Safety Long Acceleration Limits"),
-      tr("Force to use safety with raised longitudunal acceleration limits."),
-      "../assets/offroad/icon_warning.png",
-    },
   };
   for (auto &[param, title, desc, icon] : toggle_defs) {
     auto toggle = new ParamControl(param, title, desc, icon, this);
