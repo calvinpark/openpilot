@@ -129,16 +129,7 @@
         <source>Use neutral force and a alternative acceleration command for gain PCM compensation forces and mess with permiting brake bit.</source>
         <translation>Use a força neutra e um comando de aceleração alternativo para ganhar compensação PCM, e mexe com &quot;permit braking&quot; bit.</translation>
     </message>
-    <message>
-        <source>Raise Safety Long Acceleration Limits</source>
-        <translation>Aumente os Limites Aceleração Longitudinal</translation>
-    </message>
-    <message>
-        <source>Force to use safety with raised longitudunal acceleration limits.</source>
-        <translation>Forçar o uso de segurança com limites de aceleração longitudinal elevados.</translation>
-    </message>
 </context>
-
 <context>
     <name>ConfirmationDialog</name>
     <message>
@@ -784,14 +775,6 @@
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>LKAS Disabled</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>LKAS Disabled: Enable LKAS to engage</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>LKAS Fault: Restart the Car</source>
         <translation type="unfinished"></translation>
     </message>
@@ -930,10 +913,6 @@ Ré</translation>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Speaker not found</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Speed Error: %1 m/s</source>
         <translation type="unfinished"></translation>
     </message>
@@ -966,10 +945,6 @@ Ré</translation>
         <translation>Stock AEB: Risco de Colisão</translation>
     </message>
     <message>
-        <source>Stock LKAS is on</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>System Initializing</source>
         <translation type="unfinished"></translation>
     </message>
@@ -1000,10 +975,6 @@ Ré</translation>
     <message>
         <source>Turn Exceeds Steering Limit</source>
         <translation>Curva Excede o Limite de Direção</translation>
-    </message>
-    <message>
-        <source>Turn off stock LKAS to engage</source>
-        <translation type="unfinished"></translation>
     </message>
     <message>
         <source>USB Error: Reboot Your Device</source>
@@ -1051,6 +1022,18 @@ Ré</translation>
     </message>
     <message>
         <source>Longitudinal Maneuver Mode</source>
+        <translation>Modo Longitudinal Maneuver</translation>
+    </message>
+    <message>
+        <source>Invalid LKAS setting</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Security Key Not Available</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Toggle stock LKAS on or off to engage</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
