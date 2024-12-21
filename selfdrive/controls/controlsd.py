@@ -56,6 +56,8 @@ class Controls:
     elif self.CP.lateralTuning.which() == 'torque':
       self.LaC = LatControlTorque(self.CP, self.CI)
 
+    self.always_on_lateral_active = True
+
   def update(self):
     self.sm.update(15)
     if self.sm.updated["liveCalibration"]:
@@ -88,7 +90,7 @@ class Controls:
 
     # Check which actuators can be enabled
     standstill = abs(CS.vEgo) <= max(self.CP.minSteerSpeed, MIN_LATERAL_CONTROL_SPEED) or CS.standstill
-    CC.latActive = (self.sm['selfdriveState'].active or True) and not CS.steerFaultTemporary and not CS.steerFaultPermanent and not standstill
+    CC.latActive = (self.sm['selfdriveState'].active or self.always_on_lateral_active) and not CS.steerFaultTemporary and not CS.steerFaultPermanent and not standstill
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and self.CP.openpilotLongitudinalControl
 
     actuators = CC.actuators
