@@ -115,7 +115,7 @@ class Car:
 
     # Always on lateral
     self.CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL
-    self.params.put_bool("AlwaysOnLateralSet", True)
+    #self.params.put_bool("AlwaysOnLateralSet", True)
 
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")
 
