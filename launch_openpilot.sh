@@ -15,7 +15,7 @@ sudo chown comma /persist/tsk
 
 # Run TSK Manager
 python3 tsk/kbd.py
-#bash # Debug
+bash # Debug
 
 # Clean up
 sudo rm -rf /data/openpilot
