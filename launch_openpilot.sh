@@ -7,6 +7,11 @@ sudo rm /data/continue.sh
 ln -sfn $(pwd) /data/pythonpath
 export PYTHONPATH="$PWD"
 
+# Pip
+TMP=/data/tmp
+mkdir TMP || true
+python3 -m pip install -r tsk/requirements.txt -t ${PYTHONPATH}
+
 # Make it possible to write to /persist/tsk
 trap "sudo mount -o remount,ro /persist" EXIT
 sudo mount -o remount,rw /persist
@@ -14,7 +19,7 @@ sudo mkdir -p /persist/tsk || true
 sudo chown comma /persist/tsk
 
 # Run TSK Manager
-python3 tsk/kbd.py
+#python3 tsk/kbd.py
 bash # Debug
 
 # Clean up
