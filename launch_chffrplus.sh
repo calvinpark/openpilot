@@ -87,24 +87,36 @@ function launch {
     ./build.py
   fi
 
-  # TSK: Make it possible to write to /persist/tsk
+  ############# TSK
+  cd /data/openpilot
+
+  # Make /persist/tsk writable during this run
   trap "sudo mount -o remount,ro /persist" EXIT
   sudo mount -o remount,rw /persist
   sudo mkdir -p /persist/tsk || true
   sudo chown comma /persist/tsk
 
-  # TSK: Next reboot should trigger an install without a reset
+  # Next reboot should trigger an install without a reset
   sudo rm /data/continue.sh
-  cd /data/openpilot
 
-  # TSK: Run
-  system/ui/tsk-kbd
+  # Pip for tsk-ext.py
+  TMP=/data/tmp
+  mkdir TMP || true
+  python3 -m pip install -r /data/openpilot/system/ui/requirements.txt -t ${PYTHONPATH}
+
+  # General prep
+  mkdir /data/openpilot/tsk || true
+  echo "If you see this, TSK Extractor didn't run" > tsk/ext.txt
+
+  # Run
+  # /data/openpilot/system/ui/tsk-text
   bash # Debug
 
-  # TSK: Clean up
+  # Clean up
   sudo rm -rf /data/openpilot
-  # TSK: And done
+  # And done
   sudo reboot
+  ############# TSK
 
   ./manager.py
 
