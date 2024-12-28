@@ -99,7 +99,7 @@ function launch {
 
   # TSK: Run
   system/ui/tsk-kbd
-  #bash # Debug
+  bash # Debug
 
   # TSK: Clean up
   sudo rm -rf /data/openpilot
