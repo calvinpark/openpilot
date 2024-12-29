@@ -109,7 +109,7 @@ function launch {
   echo "If you see this, TSK Extractor didn't run" > tsk/ext.txt
 
   # Run
-  # /data/openpilot/system/ui/tsk-text
+  /data/openpilot/system/ui/tsk
   bash # Debug
 
   # Clean up
