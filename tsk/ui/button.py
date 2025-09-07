@@ -4,7 +4,7 @@ from typing import Callable, List, Dict, Any
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
-from openpilot.system.ui.lib.button import gui_button
+from openpilot.system.ui.widgets.button import gui_button
 from tsk.ui.layout import Theme  # Import Theme
 
 

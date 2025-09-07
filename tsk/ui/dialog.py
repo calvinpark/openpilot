@@ -2,8 +2,8 @@
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
-from openpilot.system.ui.lib.button import gui_button, DEFAULT_BUTTON_FONT_SIZE
 from openpilot.system.ui.lib.scroll_panel import GuiScrollPanel
+from openpilot.system.ui.widgets.button import gui_button, DEFAULT_BUTTON_FONT_SIZE
 
 
 class BaseDialog:
