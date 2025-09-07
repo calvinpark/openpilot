@@ -1,9 +1,12 @@
 # tsk/ui/header.py
+
 from typing import Optional
+import platform
 
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
+from openpilot.system.ui.widgets.button import gui_button, Button as OpenPilotButton, ButtonStyle
 from tsk.common.key_file_manager import KeyFileManager
 from tsk.ui.layout import Theme  # Import Theme
 
@@ -14,6 +17,28 @@ class Header:
   def __init__(self):
     """Initializes the Header."""
     self.key_manager = KeyFileManager()
+
+    # ADDED: Platform detection and Widget navigation buttons
+    self.use_widget = platform.system() == "Linux"
+    self._nav_result = None
+
+    if self.use_widget:
+      self._nav_left = OpenPilotButton(
+        text="",
+        click_callback=lambda: self._set_nav(Theme.menu_tools),
+        button_style=ButtonStyle.NORMAL,
+        font_size=1,
+      )
+      self._nav_right = OpenPilotButton(
+        text="",
+        click_callback=lambda: self._set_nav(Theme.menu_reboot),
+        button_style=ButtonStyle.NORMAL,
+        font_size=1,
+      )
+
+  def _set_nav(self, menu_id):
+    """Set navigation result for Widget callbacks."""
+    self._nav_result = menu_id
 
   def _draw_title(self, rect: rl.Rectangle, current_menu: int) -> None:
     """Draws the title strip."""
@@ -41,16 +66,30 @@ class Header:
     right_button_x = gui_app.width - nav_button_width
     right_button_rect = rl.Rectangle(right_button_x, 0, nav_button_width, rect.height)
 
+    self._nav_result = None
     new_menu = None
 
-    def handle_button(button_rect: rl.Rectangle, text: str, target_menu: int) -> Optional[int]:
+    def handle_button(button_rect: rl.Rectangle, text: str, target_menu: int, is_left: bool) -> Optional[int]:
       """Handles drawing, input, and logic for a single navigation button."""
-      mouse_pos = rl.get_mouse_position()
-      is_hovering = rl.check_collision_point_rec(mouse_pos, button_rect)
-      is_pressed = is_hovering and rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT)
 
-      rl.draw_rectangle_rec(button_rect, Theme.button_color)
+      if self.use_widget:
+        # Linux: Use Widget system
+        widget = self._nav_left if is_left else self._nav_right
+        widget.render(button_rect)
+        # Draw TSKM styling over Widget
+        rl.draw_rectangle_rec(button_rect, Theme.button_color)
+      else:
+        # macOS: Use original mouse handling
+        mouse_pos = rl.get_mouse_position()
+        is_hovering = rl.check_collision_point_rec(mouse_pos, button_rect)
+        is_pressed = is_hovering and rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT)
 
+        rl.draw_rectangle_rec(button_rect, Theme.button_color)
+
+        if is_pressed:
+          return target_menu
+
+      # Draw text (same for both platforms)
       lines = text.splitlines()
       total_text_height = len(lines) * rl.measure_text_ex(gui_app.font(), "A", Theme.nav_button_font_size, 1.0).y
       start_y = rect.y + (rect.height - total_text_height) / 2
@@ -59,20 +98,23 @@ class Header:
         text_size = rl.measure_text_ex(gui_app.font(), line, Theme.nav_button_font_size, 1.0)
         text_x = button_rect.x + (button_rect.width - text_size.x) / 2
         text_y = start_y + i * text_size.y
-        font_color = Theme.brighten_color(rl.Color(100, 100, 100, 255), Theme.brighten_amount)  # Use the same color as other buttons
+        font_color = Theme.brighten_color(rl.Color(100, 100, 100, 255), Theme.brighten_amount)
         rl.draw_text_ex(gui_app.font(), line, rl.Vector2(text_x, text_y), Theme.nav_button_font_size, 1.0, font_color)
 
-      if is_pressed:
-        return target_menu
       return None
+
     if current_menu == Theme.menu_reboot:
-      new_menu = handle_button(left_button_rect, Theme.nav_button_text_left, Theme.menu_tools)
+      new_menu = handle_button(left_button_rect, Theme.nav_button_text_left, Theme.menu_tools, True)
 
       # --- Handle Right Button ---
     if current_menu == Theme.menu_tools:
-      right_menu = handle_button(right_button_rect, Theme.nav_button_text_right, Theme.menu_reboot)
+      right_menu = handle_button(right_button_rect, Theme.nav_button_text_right, Theme.menu_reboot, False)
       if new_menu is None:
         new_menu = right_menu
+
+    # Check Widget navigation result
+    if self.use_widget and self._nav_result is not None:
+      new_menu = self._nav_result
 
     return new_menu
 

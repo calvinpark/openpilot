@@ -1,7 +1,10 @@
 # tsk/tools_menu/keyboard.py
+
 import pyray as rl
+import platform
 
 from openpilot.system.ui.lib.application import gui_app
+from openpilot.system.ui.widgets.button import gui_button, ButtonStyle, Button as OpenPilotButton
 from tsk.common.key_file_manager import KeyFileManager
 
 
@@ -15,6 +18,10 @@ class KeyboardDialog:
     self.max_input_length = 32
     self.show_install_button = False
     self.install_success = False  # Added success flag
+
+    # ADDED: Platform detection
+    self.use_widget = platform.system() == "Linux"
+    self.dialog_open = True
 
     # Font and Color Definitions
     self.font_size = 100
@@ -46,28 +53,87 @@ class KeyboardDialog:
     self.keyboard_button_width_row1 = gui_app.width / len(self.keyboard_layout[0])
     self.keyboard_button_width_row2 = gui_app.width / len(self.keyboard_layout[1])
 
+    # ADDED: Widget buttons for Linux
+    if self.use_widget:
+      self._create_widgets()
+
+  def _create_widgets(self):
+    """Create Widget buttons for Linux."""
+    self._x_widget = OpenPilotButton(
+      text="",
+      click_callback=self._on_x_click,
+      button_style=ButtonStyle.NORMAL,
+      font_size=1,
+    )
+
+    self._install_widget = OpenPilotButton(
+      text="",
+      click_callback=self._on_install_click,
+      button_style=ButtonStyle.NORMAL,
+      font_size=1,
+    )
+
+    # Create keyboard key widgets
+    self._key_widgets = {}
+    for row_index, row in enumerate(self.keyboard_layout):
+      for key_index, key in enumerate(row):
+        key_id = f"{row_index}_{key_index}"
+        self._key_widgets[key_id] = OpenPilotButton(
+          text="",
+          click_callback=lambda k=key: self._on_key_click(k),
+          button_style=ButtonStyle.NORMAL,
+          font_size=1,
+        )
+
+  def _on_x_click(self):
+    """Handle X button Widget click."""
+    self.dialog_open = False
+
+  def _on_install_click(self):
+    """Handle install button Widget click."""
+    self.key_file_manager.install_key(self.input_text)
+    self.install_success = True
+    self.show_install_button = False
+
+  def _on_key_click(self, key):
+    """Handle keyboard key Widget click."""
+    if key == "<":
+      self.input_text = self.input_text[:-1]
+    else:
+      if len(self.input_text) < self.max_input_length:
+        self.input_text += key
+    self.show_install_button = len(self.input_text) == self.max_input_length
+    self.install_success = False
+
   def update_key_status(self):
     """Updates the key status text."""
     key = self.key_file_manager.installed_key
     self.key_status_text = f"Key installed: {key}" if key else "Key not installed"
 
   def draw_x_button(self, rect: rl.Rectangle, text: str) -> bool:
-    """Draws the "X" button and handles click detection."""
-    is_pressed = rl.check_collision_point_rec(rl.get_mouse_position(), rect) and rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT)
+    """Draws the X button and handles input."""
+    button_clicked = False
 
-    # Draw button rectangle
+    if self.use_widget:
+      # Linux: Use Widget
+      self._x_widget.render(rect)
+    else:
+      # macOS: Use gui_button
+      button_clicked = gui_button(rect, "", font_size=1, button_style=ButtonStyle.NO_EFFECT)
+      if button_clicked:
+        self.dialog_open = False
+
+    # Draw original appearance
     rl.draw_rectangle_rec(rect, self.keyboard_bg_color)
-
-    # Draw text
     text_size = rl.measure_text_ex(gui_app.font(), text, self.font_size, 0)
     text_x = rect.x + (rect.width - text_size.x) / 2
     text_y = rect.y + (rect.height - text_size.y) / 2
     rl.draw_text_ex(gui_app.font(), text, rl.Vector2(text_x, text_y), self.font_size, 0, self.x_button_text_color)
 
-    return is_pressed
+    return button_clicked
 
   def draw_keyboard(self, rect: rl.Rectangle) -> None:
-    """Draws the on-screen keyboard."""
+    """Draws the keyboard and handles key input."""
     start_x = rect.x
     start_y = rect.y
 
@@ -78,9 +144,25 @@ class KeyboardDialog:
         button_y = start_y + row_index * (self.keyboard_button_height + self.keyboard_spacing)
         button_rect = rl.Rectangle(button_x, button_y, button_width, self.keyboard_button_height)
 
-        is_pressed = rl.check_collision_point_rec(rl.get_mouse_position(), button_rect) and rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT)
+        key_pressed = False
 
-        # Draw button rectangle
+        if self.use_widget:
+          # Linux: Use Widget
+          key_id = f"{row_index}_{key_index}"
+          self._key_widgets[key_id].render(button_rect)
+        else:
+          # macOS: Use gui_button
+          key_pressed = gui_button(button_rect, "", font_size=1, button_style=ButtonStyle.NO_EFFECT)
+          if key_pressed:
+            if key == "<":
+              self.input_text = self.input_text[:-1]
+            else:
+              if len(self.input_text) < self.max_input_length:
+                self.input_text += key
+            self.show_install_button = len(self.input_text) == self.max_input_length
+            self.install_success = False
+
+        # Draw original appearance
         rl.draw_rectangle_rec(button_rect, self.keyboard_bg_color)
         rl.draw_rectangle_lines_ex(button_rect, self.keyboard_border_thickness, self.keyboard_border_color)
 
@@ -90,19 +172,109 @@ class KeyboardDialog:
         text_y = button_y + (self.keyboard_button_height - text_size.y) / 2
         rl.draw_text_ex(gui_app.font(), key, rl.Vector2(text_x, text_y), self.font_size, 0, rl.LIGHTGRAY)
 
-        if is_pressed:
-          if key == "<":
-            self.input_text = self.input_text[:-1]
-          else:
-            if len(self.input_text) < self.max_input_length:
-              self.input_text += key
-          self.show_install_button = len(self.input_text) == self.max_input_length
-          self.install_success = False # Reset success flag when input changes
+  def render_dialog(self):
+    """Renders the keyboard dialog."""
+    # Calculate vertical centering
+    keyboard_height = 2 * self.keyboard_button_height
+    available_height = gui_app.height - keyboard_height
+    total_content_height = 0
+
+    # Key Status Label
+    self.update_key_status()
+    key_status_text_size = rl.measure_text_ex(gui_app.font(), self.key_status_text, self.key_status_font_size, 0)
+    total_content_height += key_status_text_size.y
+
+    # Input Box
+    input_box_height = self.font_size * 1.5
+    total_content_height += input_box_height
+
+    # Remaining Characters Label / Install Button / Success Label
+    total_content_height += self.font_size
+
+    vertical_offset = (available_height - total_content_height) / 2
+
+    # Key Status Label
+    key_status_text_x = (gui_app.width - key_status_text_size.x) / 2
+    key_status_text_y = 20 + vertical_offset
+    rl.draw_text_ex(gui_app.font(), self.key_status_text, rl.Vector2(key_status_text_x, key_status_text_y), self.key_status_font_size, 0, rl.LIGHTGRAY)
+
+    # Input Box
+    input_box_x = (gui_app.width - self.input_box_width) / 2
+    input_box_y = key_status_text_y + key_status_text_size.y + 20
+    rl.draw_rectangle(int(input_box_x), int(input_box_y), int(self.input_box_width), int(input_box_height), self.input_box_bg_color)
+    rl.draw_rectangle_lines(int(input_box_x), int(input_box_y), int(self.input_box_width), int(input_box_height), self.input_box_border_color)
+
+    # Draw input text with color cycling
+    input_text_x = input_box_x + 5
+    input_text_y = input_box_y + (input_box_height - rl.measure_text_ex(gui_app.font(), "A", self.font_size, 0).y) / 2
+    x_offset = 0
+    for i, char in enumerate(self.input_text):
+      color = self.input_text_color_1 if (i // 4) % 2 == 0 else self.input_text_color_2
+      char_width = rl.measure_text_ex(gui_app.font(), char, self.font_size, 0).x
+      rl.draw_text_ex(gui_app.font(), char, rl.Vector2(input_text_x + x_offset, input_text_y), self.font_size, 0, color)
+      x_offset += char_width
+
+    # Remaining Characters Label / Install Button / Success Label
+    remaining_chars = self.max_input_length - len(self.input_text)
+    remaining_text_y = input_box_y + input_box_height + 10
+
+    if self.install_success:
+      # Success Label
+      success_text = "Success!"
+      success_text_size = rl.measure_text_ex(gui_app.font(), success_text, self.font_size, 0)
+      success_text_x = (gui_app.width - success_text_size.x) / 2
+      rl.draw_text_ex(gui_app.font(), success_text, rl.Vector2(success_text_x, remaining_text_y), self.font_size, 0, rl.GREEN)
+
+    elif self.show_install_button:
+      # Install Button
+      install_text = "Install this key"
+      install_text_size = rl.measure_text_ex(gui_app.font(), install_text, self.font_size, 0)
+      install_button_width = install_text_size.x + 40
+      install_button_height = install_text_size.y + 20
+      install_button_x = (gui_app.width - install_button_width) / 2
+      install_button_rect = rl.Rectangle(install_button_x, remaining_text_y, install_button_width, install_button_height)
+
+      install_clicked = False
+
+      if self.use_widget:
+        # Linux: Use Widget
+        self._install_widget.render(install_button_rect)
+      else:
+        # macOS: Use gui_button
+        install_clicked = gui_button(install_button_rect, "", font_size=1, button_style=ButtonStyle.NO_EFFECT)
+        if install_clicked:
+          self.key_file_manager.install_key(self.input_text)
+          self.install_success = True
+          self.show_install_button = False
+
+      # Draw original appearance
+      rl.draw_rectangle_rec(install_button_rect, self.keyboard_bg_color)
+      install_text_x = install_button_x + (install_button_width - install_text_size.x) / 2
+      install_text_y = remaining_text_y + (install_button_height - install_text_size.y) / 2
+      rl.draw_text_ex(gui_app.font(), install_text, rl.Vector2(install_text_x, install_text_y), self.font_size, 0, rl.LIGHTGRAY)
+
+    else:
+      # Remaining Characters Label
+      remaining_text = f"{remaining_chars} characters left"
+      remaining_text_size = rl.measure_text_ex(gui_app.font(), remaining_text, self.font_size, 0)
+      remaining_text_x = (gui_app.width - remaining_text_size.x) / 2
+      rl.draw_text_ex(gui_app.font(), remaining_text, rl.Vector2(remaining_text_x, remaining_text_y), self.font_size, 0, rl.DARKGRAY)
+
+    # "X" Button (Top Right)
+    button_x = gui_app.width - self.x_button_width
+    button_y = 0
+    self.draw_x_button(rl.Rectangle(button_x, button_y, self.x_button_width, self.x_button_height), self.x_button_text)
+
+    # Keyboard
+    keyboard_x = 0
+    keyboard_y = gui_app.height - 2 * self.keyboard_button_height
+    keyboard_width = gui_app.width
+    keyboard_height = 2 * self.keyboard_button_height
+    self.draw_keyboard(rl.Rectangle(keyboard_x, keyboard_y, keyboard_width, keyboard_height))
 
   @staticmethod
   def ask():
     """Displays the TSK Keyboard dialog."""
-    dialog_open = True
     dialog = KeyboardDialog()
 
     # Get the current key and set it as the default text
@@ -111,106 +283,11 @@ class KeyboardDialog:
       dialog.input_text = installed_key
       dialog.show_install_button = len(dialog.input_text) == dialog.max_input_length
 
-    dialog.update_key_status()  # Initial key status update
+    dialog.update_key_status()
 
-    def render_dialog():
-      nonlocal dialog_open
+    # CHANGED: Use gui_app.render() instead of manual loop
+    for _ in gui_app.render():
+      if not dialog.dialog_open or rl.window_should_close():
+        break
 
-      # Calculate vertical centering
-      keyboard_height = 2 * dialog.keyboard_button_height
-      available_height = gui_app.height - keyboard_height
-      total_content_height = 0
-
-      # Key Status Label
-      dialog.update_key_status()
-      key_status_text_size = rl.measure_text_ex(gui_app.font(), dialog.key_status_text, dialog.key_status_font_size, 0)
-      total_content_height += key_status_text_size.y
-
-      # Input Box
-      input_box_height = dialog.font_size * 1.5
-      total_content_height += input_box_height
-
-      # Remaining Characters Label / Install Button / Success Label
-      total_content_height += dialog.font_size # Approximate height
-
-      vertical_offset = (available_height - total_content_height) / 2
-
-      # Key Status Label
-      key_status_text_x = (gui_app.width - key_status_text_size.x) / 2
-      key_status_text_y = 20 + vertical_offset # Apply vertical offset
-      rl.draw_text_ex(gui_app.font(), dialog.key_status_text, rl.Vector2(key_status_text_x, key_status_text_y), dialog.key_status_font_size, 0, rl.LIGHTGRAY) # Light gray
-
-      # Input Box
-      input_box_x = (gui_app.width - dialog.input_box_width) / 2
-      input_box_y = key_status_text_y + key_status_text_size.y + 20 # Apply vertical offset
-      rl.draw_rectangle(int(input_box_x), int(input_box_y), int(dialog.input_box_width), int(input_box_height), dialog.input_box_bg_color)
-      rl.draw_rectangle_lines(int(input_box_x), int(input_box_y), int(dialog.input_box_width), int(input_box_height), dialog.input_box_border_color)
-
-      # Draw input text with color cycling
-      input_text_x = input_box_x + 5
-      input_text_y = input_box_y + (input_box_height - rl.measure_text_ex(gui_app.font(), "A", dialog.font_size, 0).y) / 2
-      x_offset = 0
-      for i, char in enumerate(dialog.input_text):
-        color = dialog.input_text_color_1 if (i // 4) % 2 == 0 else dialog.input_text_color_2
-        char_width = rl.measure_text_ex(gui_app.font(), char, dialog.font_size, 0).x
-        rl.draw_text_ex(gui_app.font(), char, rl.Vector2(input_text_x + x_offset, input_text_y), dialog.font_size, 0, color)
-        x_offset += char_width
-
-      # Remaining Characters Label / Install Button / Success Label
-      remaining_chars = dialog.max_input_length - len(dialog.input_text)
-      remaining_text_y = input_box_y + input_box_height + 10 # Apply vertical offset
-
-      if dialog.install_success:
-        # Success Label
-        success_text = "Success!"
-        success_text_size = rl.measure_text_ex(gui_app.font(), success_text, dialog.font_size, 0)
-        success_text_x = (gui_app.width - success_text_size.x) / 2
-        rl.draw_text_ex(gui_app.font(), success_text, rl.Vector2(success_text_x, remaining_text_y), dialog.font_size, 0, rl.GREEN)
-
-      elif dialog.show_install_button:
-        # Install Button
-        install_text = "Install this key"
-        install_text_size = rl.measure_text_ex(gui_app.font(), install_text, dialog.font_size, 0)
-        install_button_width = install_text_size.x + 40  # Add some padding
-        install_button_height = install_text_size.y + 20 # Add some padding
-        install_button_x = (gui_app.width - install_button_width) / 2
-        install_button_rect = rl.Rectangle(install_button_x, remaining_text_y, install_button_width, install_button_height)
-        if rl.check_collision_point_rec(rl.get_mouse_position(), install_button_rect) and rl.is_mouse_button_pressed(rl.MouseButton.MOUSE_BUTTON_LEFT):
-          # Install key
-          dialog.key_file_manager.install_key(dialog.input_text)
-          dialog.install_success = True
-          dialog.show_install_button = False
-
-        rl.draw_rectangle_rec(install_button_rect, dialog.keyboard_bg_color) # Keyboard background color
-        install_text_x = install_button_x + (install_button_width - install_text_size.x) / 2
-        install_text_y = remaining_text_y + (install_button_height - install_text_size.y) / 2
-        rl.draw_text_ex(gui_app.font(), install_text, rl.Vector2(install_text_x, install_text_y), dialog.font_size, 0, rl.LIGHTGRAY) # Light gray text
-
-      else:
-        # Remaining Characters Label
-        remaining_text = f"{remaining_chars} characters left"
-        remaining_text_size = rl.measure_text_ex(gui_app.font(), remaining_text, dialog.font_size, 0)
-        remaining_text_x = (gui_app.width - remaining_text_size.x) / 2
-        rl.draw_text_ex(gui_app.font(), remaining_text, rl.Vector2(remaining_text_x, remaining_text_y), dialog.font_size, 0, rl.DARKGRAY)
-
-      # "X" Button (Top Right - All the way to the edge)
-      button_x = gui_app.width - dialog.x_button_width
-      button_y = 0
-      if dialog.draw_x_button(rl.Rectangle(button_x, button_y, dialog.x_button_width, dialog.x_button_height), dialog.x_button_text):
-        dialog_open = False
-
-      # Keyboard
-      keyboard_x = 0
-      keyboard_y = gui_app.height - 2 * dialog.keyboard_button_height
-      keyboard_width = gui_app.width
-      keyboard_height = 2 * dialog.keyboard_button_height
-      dialog.draw_keyboard(rl.Rectangle(keyboard_x, keyboard_y, keyboard_width, keyboard_height))
-
-    # Main loop
-    while dialog_open and not rl.window_should_close():
-      rl.begin_drawing()
-      rl.clear_background(rl.BLACK)
-
-      render_dialog()
-
-      rl.end_drawing()
+      dialog.render_dialog()

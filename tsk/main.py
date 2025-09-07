@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # tsk/main.py
+
 import sys
 
 import pyray as rl
@@ -63,13 +64,8 @@ def main():
   gui_app.init_window("TSK Manager")
   tskm = TSKManager()
 
-  while not rl.window_should_close():
-    rl.begin_drawing()
-    rl.clear_background(rl.BLACK)
-
+  for _ in gui_app.render():
     tskm.render(rl.Rectangle(0, 0, gui_app.width, gui_app.height))
-
-    rl.end_drawing()
 
   rl.close_window()
   sys.exit(0)  # Necessary for macOS

@@ -1,9 +1,11 @@
 # tsk/ui/dialog.py
+
 import pyray as rl
+import platform
 
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.scroll_panel import GuiScrollPanel
-from openpilot.system.ui.widgets.button import gui_button, DEFAULT_BUTTON_FONT_SIZE
+from openpilot.system.ui.widgets.button import gui_button, DEFAULT_BUTTON_FONT_SIZE, Button as OpenPilotButton, ButtonStyle
 
 
 class BaseDialog:
@@ -22,6 +24,10 @@ class BaseDialog:
     self.font_size = font_size
     self.scroll_to_bottom = scroll_to_bottom
     self.LINE_HEIGHT = self.font_size * 1.1
+
+    # Platform detection
+    self.use_widget = platform.system() == "Linux"
+
     self.textarea_rect = rl.Rectangle(
       self.BORDER_SIZE,
       self.BORDER_SIZE,
@@ -84,15 +90,33 @@ class BaseDialog:
 class OkayDialog(BaseDialog):
   """A full-screen dialog with a scrollable text area and an Okay button."""
 
+  def __init__(self, body_text: str, font_size: int = BaseDialog.FONT_SIZE, scroll_to_bottom: bool = False, okay_text: str = "Okay"):
+    super().__init__(body_text, font_size, scroll_to_bottom)
+    self.okay_text = okay_text
+    self.okay_clicked = False
+
+    # Widget support
+    if self.use_widget:
+      self._okay_widget = OpenPilotButton(
+        text="",
+        click_callback=self._on_okay,
+        button_style=ButtonStyle.NORMAL,
+        font_size=1,
+      )
+
+  def _on_okay(self):
+    """Handle Widget okay click."""
+    self.okay_clicked = True
+
   @staticmethod
   def ask(body_text: str, font_size: int = BaseDialog.FONT_SIZE, scroll_to_bottom: bool = False, okay_text: str = "Okay") -> None:
     """Displays a full-screen Okay dialog."""
-    okay_pressed = False
+    dialog = OkayDialog(body_text, font_size, scroll_to_bottom, okay_text)
 
-    dialog = OkayDialog(body_text, font_size, scroll_to_bottom)
-
-    def render_dialog():
-      nonlocal okay_pressed  # Allow modification of the okay_pressed variable
+    # Use gui_app.render() instead of manual loop
+    for _ in gui_app.render():
+      if dialog.okay_clicked or rl.window_should_close():
+        break
 
       dialog.render_text_area()
 
@@ -102,77 +126,100 @@ class OkayDialog(BaseDialog):
       # Button position (centered horizontally, vertically centered in the button area)
       button_x = (gui_app.width - BaseDialog.BUTTON_WIDTH) / 2
       button_y = dialog.textarea_rect.y + dialog.textarea_rect.height + (button_area_height - BaseDialog.BUTTON_HEIGHT) / 2
+      button_rect = rl.Rectangle(button_x, button_y, BaseDialog.BUTTON_WIDTH, BaseDialog.BUTTON_HEIGHT)
 
-      # Okay Button
-      if gui_button(rl.Rectangle(button_x, button_y, BaseDialog.BUTTON_WIDTH, BaseDialog.BUTTON_HEIGHT), okay_text):
-        okay_pressed = True
+      if dialog.use_widget:
+        # Linux: Use Widget
+        dialog._okay_widget.render(button_rect)
+        # Draw TSKM styling over Widget
+        rl.draw_rectangle_rec(button_rect, rl.Color(20, 100, 20, 255))  # Green
+      else:
+        # macOS: Use gui_button with proper background color
+        if gui_button(button_rect, ""):
+          dialog.okay_clicked = True
+        # FIXED: Draw green background for macOS too
+        rl.draw_rectangle_rec(button_rect, rl.Color(20, 100, 20, 255))  # Green
 
-    # Main loop
-    while not okay_pressed and not rl.window_should_close():
-      rl.begin_drawing()
-      rl.clear_background(rl.BLACK)
-
-      render_dialog()
-
-      rl.end_drawing()
+      # Draw button text (same for both platforms)
+      font = gui_app.font()
+      text_size = rl.measure_text_ex(font, dialog.okay_text, DEFAULT_BUTTON_FONT_SIZE, 0)
+      text_x = button_x + (BaseDialog.BUTTON_WIDTH - text_size.x) / 2
+      text_y = button_y + (BaseDialog.BUTTON_HEIGHT - text_size.y) / 2
+      rl.draw_text_ex(font, dialog.okay_text, rl.Vector2(text_x, text_y), DEFAULT_BUTTON_FONT_SIZE, 0, rl.WHITE)
 
 
 class YesNoDialog(BaseDialog):
   """A full-screen dialog with a scrollable text area and Yes/No buttons."""
 
+  def __init__(self, body_text: str, font_size: int = BaseDialog.FONT_SIZE, scroll_to_bottom: bool = False, yes_text: str = "Yes", no_text: str = "No"):
+    super().__init__(body_text, font_size, scroll_to_bottom)
+    self.yes_text = yes_text
+    self.no_text = no_text
+    self.result = None
+
+    # Widget support
+    if self.use_widget:
+      self._yes_widget = OpenPilotButton(
+        text="",
+        click_callback=lambda: self._set_result(True),
+        button_style=ButtonStyle.NORMAL,
+        font_size=1,
+      )
+      self._no_widget = OpenPilotButton(
+        text="",
+        click_callback=lambda: self._set_result(False),
+        button_style=ButtonStyle.NORMAL,
+        font_size=1,
+      )
+
+  def _set_result(self, value):
+    """Handle Widget button clicks."""
+    self.result = value
+
   @staticmethod
   def ask(body_text: str, font_size: int = BaseDialog.FONT_SIZE, scroll_to_bottom: bool = False, yes_text: str = "Yes", no_text: str = "No") -> bool | None:
     """Displays a full-screen Yes/No dialog and returns a boolean based on the user's choice."""
-    result = None  # Use None to indicate the dialog is still active
+    dialog = YesNoDialog(body_text, font_size, scroll_to_bottom, yes_text, no_text)
 
-    dialog = YesNoDialog(body_text, font_size, scroll_to_bottom)
-
-    def render_dialog():
-      nonlocal result  # Allow modification of the result variable
+    # Use gui_app.render() instead of manual loop
+    for _ in gui_app.render():
+      if dialog.result is not None or rl.window_should_close():
+        break
 
       dialog.render_text_area()
 
       button_top = gui_app.height - BaseDialog.BORDER_SIZE - BaseDialog.BUTTON_HEIGHT
-      no_button_x = BaseDialog.BORDER_SIZE
-      yes_button_x = gui_app.width - BaseDialog.BORDER_SIZE - BaseDialog.BUTTON_WIDTH
+      no_button_rect = rl.Rectangle(BaseDialog.BORDER_SIZE, button_top, BaseDialog.BUTTON_WIDTH, BaseDialog.BUTTON_HEIGHT)
+      yes_button_rect = rl.Rectangle(gui_app.width - BaseDialog.BORDER_SIZE - BaseDialog.BUTTON_WIDTH, button_top, BaseDialog.BUTTON_WIDTH, BaseDialog.BUTTON_HEIGHT)
 
-      no_button_rect = rl.Rectangle(no_button_x, button_top, BaseDialog.BUTTON_WIDTH, BaseDialog.BUTTON_HEIGHT)
-      yes_button_rect = rl.Rectangle(yes_button_x, button_top, BaseDialog.BUTTON_WIDTH, BaseDialog.BUTTON_HEIGHT)
+      if dialog.use_widget:
+        # Linux: Use Widgets
+        dialog._no_widget.render(no_button_rect)
+        dialog._yes_widget.render(yes_button_rect)
+        # Draw TSKM styling over Widgets
+        rl.draw_rectangle_rec(no_button_rect, rl.Color(100, 20, 20, 255))   # Red
+        rl.draw_rectangle_rec(yes_button_rect, rl.Color(20, 100, 20, 255))  # Green
+      else:
+        # macOS: Use gui_button with proper background colors
+        if gui_button(no_button_rect, ""):
+          dialog.result = False
+        if gui_button(yes_button_rect, ""):
+          dialog.result = True
+        # FIXED: Draw colored backgrounds for macOS too
+        rl.draw_rectangle_rec(no_button_rect, rl.Color(100, 20, 20, 255))   # Red
+        rl.draw_rectangle_rec(yes_button_rect, rl.Color(20, 100, 20, 255))  # Green
 
-      if draw_custom_button(no_button_rect, no_text, rl.Color(100, 20, 20, 255)):
-        result = False
-      if draw_custom_button(yes_button_rect, yes_text, rl.Color(20, 100, 20, 255)):
-        result = True
+      # Draw button text (same for both platforms)
+      font = gui_app.font()
 
-    # Main loop
-    while result is None and not rl.window_should_close():
-      rl.begin_drawing()
-      rl.clear_background(rl.BLACK)
+      no_text_size = rl.measure_text_ex(font, dialog.no_text, DEFAULT_BUTTON_FONT_SIZE, 0)
+      no_text_x = BaseDialog.BORDER_SIZE + (BaseDialog.BUTTON_WIDTH - no_text_size.x) / 2
+      no_text_y = button_top + (BaseDialog.BUTTON_HEIGHT - no_text_size.y) / 2
+      rl.draw_text_ex(font, dialog.no_text, rl.Vector2(no_text_x, no_text_y), DEFAULT_BUTTON_FONT_SIZE, 0, rl.WHITE)
 
-      render_dialog()
+      yes_text_size = rl.measure_text_ex(font, dialog.yes_text, DEFAULT_BUTTON_FONT_SIZE, 0)
+      yes_text_x = gui_app.width - BaseDialog.BORDER_SIZE - BaseDialog.BUTTON_WIDTH + (BaseDialog.BUTTON_WIDTH - yes_text_size.x) / 2
+      yes_text_y = button_top + (BaseDialog.BUTTON_HEIGHT - yes_text_size.y) / 2
+      rl.draw_text_ex(font, dialog.yes_text, rl.Vector2(yes_text_x, yes_text_y), DEFAULT_BUTTON_FONT_SIZE, 0, rl.WHITE)
 
-      rl.end_drawing()
-
-    return result
-
-
-def draw_custom_button(rect: rl.Rectangle, text: str, color: rl.Color) -> bool:
-  """Draws a custom button with specified color and handles click detection."""
-  mouse_pos = rl.get_mouse_position()
-  is_hovering = rl.check_collision_point_rec(mouse_pos, rect)
-  is_pressed = is_hovering and rl.is_mouse_button_released(rl.MouseButton.MOUSE_BUTTON_LEFT)
-  result = False
-
-  rl.draw_rectangle_rec(rect, color)
-
-  # Draw button text (centered)
-  font = gui_app.font()
-  text_size = rl.measure_text_ex(font, text, DEFAULT_BUTTON_FONT_SIZE, 0)
-  text_x = rect.x + (rect.width - text_size.x) / 2
-  text_y = rect.y + (rect.height - text_size.y) / 2
-  rl.draw_text_ex(font, text, rl.Vector2(text_x, text_y), DEFAULT_BUTTON_FONT_SIZE, 0, rl.WHITE)
-
-  if is_pressed:
-    result = True
-
-  return result
+    return dialog.result

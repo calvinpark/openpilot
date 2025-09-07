@@ -1,11 +1,13 @@
 # tsk/ui/button.py
+
 from typing import Callable, List, Dict, Any
+import platform
 
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
-from openpilot.system.ui.widgets.button import gui_button
-from tsk.ui.layout import Theme  # Import Theme
+from openpilot.system.ui.widgets.button import gui_button, Button as OpenPilotButton, ButtonStyle
+from tsk.ui.layout import Theme
 
 
 class Button:
@@ -36,13 +38,39 @@ class Button:
     self.last_pressed_time: float = 0.0
     self.debounce_delay: float = 0.2  # seconds
 
+    # ADDED: Platform detection for Widget system
+    self.use_widget = platform.system() == "Linux"
+    if self.use_widget:
+      self._widget = OpenPilotButton(
+        text="",
+        click_callback=self._on_click,
+        button_style=ButtonStyle.NORMAL,
+        font_size=1,
+      )
+
+  def _on_click(self):
+    """Handle Widget click."""
+    current_time = rl.get_time()
+    if current_time - self.last_pressed_time > self.debounce_delay:
+      self.action()
+      self.last_pressed_time = current_time
+
   def render(self) -> None:
     """Renders the button."""
-    current_time = rl.get_time()
-    if gui_button(rl.Rectangle(self.x, self.y, self.width, self.height), ""):
-      if current_time - self.last_pressed_time > self.debounce_delay:
-        self.action()
-        self.last_pressed_time = current_time
+    rect = rl.Rectangle(self.x, self.y, self.width, self.height)
+
+    if self.use_widget:
+      # Linux: Use Widget system
+      self._widget.render(rect)
+      # Draw TSKM background over Widget
+      rl.draw_rectangle_rounded(rect, 0.1, 10, rl.Color(51, 51, 51, 255))
+    else:
+      # macOS: Use gui_button
+      current_time = rl.get_time()
+      if gui_button(rect, ""):
+        if current_time - self.last_pressed_time > self.debounce_delay:
+          self.action()
+          self.last_pressed_time = current_time
 
     self._draw_labels()
 
