@@ -235,9 +235,9 @@ class GitCloneProgress:
 # Main Application
 # -------------------------------------------------------------------------
 
-class PrefetchApp:
+class PrefetchAppC3:
   """
-  GUI application to track git clone operations.
+  GUI application to track git clone operations for C3 (big screen).
 
   This class creates a window with progress bars to visualize the status
   of git clone operations. It handles:
@@ -370,8 +370,13 @@ class PrefetchApp:
        d. Draws the status text with retry countdown if applicable
     """
     # Step 1: Begin drawing and clear background
-    rl.begin_drawing()
-    rl.clear_background(rl.Color(0, 0, 0, 255))  # Black background
+    # Use render texture if scaling is enabled (matches gui_app behavior)
+    if gui_app._render_texture:
+      rl.begin_texture_mode(gui_app._render_texture)
+      rl.clear_background(rl.Color(0, 0, 0, 255))
+    else:
+      rl.begin_drawing()
+      rl.clear_background(rl.Color(0, 0, 0, 255))  # Black background
 
     # Step 2: Draw title
     title = "Prefetching"
@@ -452,8 +457,253 @@ class PrefetchApp:
       # Update y_offset for next operation
       y_offset += self.PROGRESS_BAR_HEIGHT + self.PADDING * 2 + self.FONT_SIZE * 2
 
-    # End drawing
+    # End drawing and scale if needed (matches gui_app behavior)
+    if gui_app._render_texture:
+      rl.end_texture_mode()
+      rl.begin_drawing()
+      rl.clear_background(rl.BLACK)
+      src_rect = rl.Rectangle(0, 0, float(gui_app.width), -float(gui_app.height))
+      dst_rect = rl.Rectangle(0, 0, float(gui_app._scaled_width), float(gui_app._scaled_height))
+      rl.draw_texture_pro(gui_app._render_texture.texture, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
     rl.end_drawing()
+
+
+class PrefetchAppC4:
+  """
+  GUI application to track git clone operations for C4 (small screen).
+
+  This class creates a window with progress bars to visualize the status
+  of git clone operations. It handles:
+  1. Setting up and starting clone operations
+  2. Rendering the UI with progress bars and status text
+  3. Managing the application lifecycle
+  4. Coordinating retries for failed operations
+  """
+
+  # UI Constants for C4 (536x240 screen)
+  PROGRESS_BAR_HEIGHT = 20
+  PROGRESS_BAR_WIDTH = 500
+  PADDING = 5
+  FONT_SIZE = 28
+  TITLE_FONT_SIZE = 28
+  GAP_AFTER_TITLE = 15
+  GAP_BETWEEN_OPERATIONS = 40
+  BAR_BG_COLOR = rl.Color(40, 40, 40, 255)
+  BAR_FG_COLOR = rl.Color(54, 77, 239, 255)
+  WHITE_TEXT_COLOR = rl.Color(255, 255, 255, 255)
+  GRAY_TEXT_COLOR = rl.Color(100, 100, 100, 255)
+
+  def __init__(self):
+    """
+    Initialize the prefetch application for C4.
+
+    Sets up the clone operations but doesn't start them yet.
+    """
+    self.initialize_operations()
+
+  def initialize_operations(self):
+    """
+    Initialize or reset the clone operations.
+
+    Creates GitCloneProgress instances for each repository we need to clone,
+    but only if the target directories don't already exist.
+    """
+    self.clone_operations = []
+
+    # Check if the recommended openpilot directory exists
+    recommended_exists = os.path.exists(RECOMMENDED_OP_DIR)
+    # Check if the alternate openpilot directory exists
+    alternate_exists = os.path.exists(ALTERNATE_OP_DIR)
+
+    # Only create operation for recommended repository if directory doesn't exist
+    if not recommended_exists:
+      self.clone_operations.append(
+        GitCloneProgress(
+          ["/usr/bin/git", "clone", "--progress",
+           f"https://github.com/{RECOMMENDED_OP_USER}/openpilot.git",
+           "-b", RECOMMENDED_OP_BRANCH, "--depth=1",
+           "--recurse-submodules", RECOMMENDED_OP_DIR],
+          f"{RECOMMENDED_OP_USER}/{RECOMMENDED_OP_BRANCH}",
+          RECOMMENDED_OP_DIR  # Target directory to delete before cloning
+        )
+      )
+
+    # Only create operation for alternate repository if directory doesn't exist
+    if not alternate_exists:
+      self.clone_operations.append(
+        GitCloneProgress(
+          ["/usr/bin/git", "clone", "--progress",
+           f"https://github.com/{ALTERNATE_OP_USER}/openpilot.git",
+           "-b", ALTERNATE_OP_BRANCH, "--depth=1",
+           "--recurse-submodules", ALTERNATE_OP_DIR],
+          f"{ALTERNATE_OP_USER}/{ALTERNATE_OP_BRANCH}",
+          ALTERNATE_OP_DIR  # Target directory to delete before cloning
+        )
+      )
+
+  def run(self):
+    """
+    Run the prefetch application with retry mechanism.
+
+    TODO: Implement C4-specific UI rendering.
+    For now, this is a stub that needs to be implemented.
+    """
+    # Initialize window using gui_app
+    gui_app.init_window("TSK Prefetch")
+
+    # Start clone operations
+    self.start_operations()
+
+    # Main loop
+    while not rl.window_should_close():
+      # Check for retries in each operation
+      for op in self.clone_operations:
+        op.check_retry()
+
+      # Check if all operations are complete or have reached max retries
+      all_done = True
+      for op in self.clone_operations:
+        if not op.completed and (not op.failed or op.retry_count < MAX_RETRIES):
+          all_done = False
+          break
+
+      # Exit condition
+      if all_done:
+        time.sleep(1)
+        break
+
+      # Render the current frame
+      self._render_frame()
+
+    # Cleanup and exit
+    rl.close_window()
+
+  def start_operations(self):
+    """
+    Start all clone operations.
+
+    Initiates the background threads for all git clone operations.
+    """
+    for op in self.clone_operations:
+      op.start()
+
+  def _render_frame(self):
+    """
+    Render a single frame of the application for C4.
+
+    Compact layout optimized for 536x240 screen.
+    """
+    # Use render texture if scaling is enabled (matches gui_app behavior)
+    if gui_app._render_texture:
+      rl.begin_texture_mode(gui_app._render_texture)
+      rl.clear_background(rl.Color(0, 0, 0, 255))
+    else:
+      rl.begin_drawing()
+      rl.clear_background(rl.Color(0, 0, 0, 255))
+
+    # Draw title
+    title = "Prefetching"
+    title_width = rl.measure_text_ex(gui_app.font(), title, self.TITLE_FONT_SIZE, 0).x
+    rl.draw_text_ex(
+      gui_app.font(),
+      title,
+      rl.Vector2((gui_app.width - title_width) // 2, self.PADDING),
+      self.TITLE_FONT_SIZE,
+      0,
+      self.WHITE_TEXT_COLOR
+    )
+
+    # Draw progress bars for each operation
+    y_offset = self.PADDING + self.TITLE_FONT_SIZE + self.GAP_AFTER_TITLE
+
+    for i, op in enumerate(self.clone_operations):
+      # Draw operation title with retry count if applicable
+      title_text = op.title
+      if op.retry_count > 0:
+        title_text += f" (Retry {op.retry_count}/{MAX_RETRIES})"
+
+      rl.draw_text_ex(
+        gui_app.font(),
+        title_text,
+        rl.Vector2(self.PADDING, y_offset),
+        self.FONT_SIZE,
+        0,
+        self.WHITE_TEXT_COLOR
+      )
+      y_offset += self.FONT_SIZE + self.PADDING
+
+      # Draw progress bar background
+      bar_x = (gui_app.width - self.PROGRESS_BAR_WIDTH) // 2
+      bar_rect = rl.Rectangle(bar_x, y_offset, self.PROGRESS_BAR_WIDTH, self.PROGRESS_BAR_HEIGHT)
+      rl.draw_rectangle_rec(bar_rect, self.BAR_BG_COLOR)
+
+      # Draw progress bar foreground
+      progress_width = (op.progress / 100.0) * self.PROGRESS_BAR_WIDTH
+      progress_rect = rl.Rectangle(bar_x, y_offset, progress_width, self.PROGRESS_BAR_HEIGHT)
+      rl.draw_rectangle_rec(progress_rect, self.BAR_FG_COLOR)
+
+      # Draw progress percentage
+      progress_text = f"{op.progress}%"
+      text_width = rl.measure_text_ex(gui_app.font(), progress_text, self.FONT_SIZE, 0).x
+      rl.draw_text_ex(
+        gui_app.font(),
+        progress_text,
+        rl.Vector2(
+          bar_x + (self.PROGRESS_BAR_WIDTH - text_width) // 2,
+          y_offset + (self.PROGRESS_BAR_HEIGHT - self.FONT_SIZE) // 2
+        ),
+        self.FONT_SIZE,
+        0,
+        self.WHITE_TEXT_COLOR
+      )
+
+      # Draw status text with retry information if applicable
+      status_y = y_offset + self.PROGRESS_BAR_HEIGHT + self.PADDING
+      status_text = op.status
+
+      # Add retry countdown or max retries reached message if applicable
+      if op.failed and op.retry_needed and op.retry_count < MAX_RETRIES:
+        countdown = max(0, int(RETRY_DELAY - (time.time() - op.retry_timer)))
+        status_text += f" - Retrying in {countdown}s..."
+      elif op.failed and op.retry_count >= MAX_RETRIES:
+        status_text += f" - Max retries reached"
+
+      # Truncate status text if too long for screen
+      max_status_width = gui_app.width - self.PADDING * 2
+      status_width = rl.measure_text_ex(gui_app.font(), status_text, self.FONT_SIZE, 0).x
+      if status_width > max_status_width:
+        # Truncate with ellipsis
+        while status_width > max_status_width and len(status_text) > 3:
+          status_text = status_text[:-4] + "..."
+          status_width = rl.measure_text_ex(gui_app.font(), status_text, self.FONT_SIZE, 0).x
+
+      # For the last operation, keep same spacing as other operations
+      # All status texts use the same PADDING distance from their progress bars
+
+      rl.draw_text_ex(
+        gui_app.font(),
+        status_text,
+        rl.Vector2(self.PADDING, status_y),
+        self.FONT_SIZE,
+        0,
+        self.GRAY_TEXT_COLOR
+      )
+
+      # Update y_offset for next operation
+      if i < len(self.clone_operations) - 1:
+        # Move to next operation: skip bar height, small padding, and gap
+        y_offset += self.PROGRESS_BAR_HEIGHT + self.PADDING + self.GAP_BETWEEN_OPERATIONS
+
+    # End rendering and scale if needed (matches gui_app behavior)
+    if gui_app._render_texture:
+      rl.end_texture_mode()
+      rl.begin_drawing()
+      rl.clear_background(rl.BLACK)
+      src_rect = rl.Rectangle(0, 0, float(gui_app.width), -float(gui_app.height))
+      dst_rect = rl.Rectangle(0, 0, float(gui_app._scaled_width), float(gui_app._scaled_height))
+      rl.draw_texture_pro(gui_app._render_texture.texture, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
+    rl.end_drawing()
+
 
 # -------------------------------------------------------------------------
 # Main Entry Point
@@ -463,9 +713,17 @@ def main():
   """
   Main function to run the prefetch application.
 
+  Detects device type (C3 vs C4) and loads appropriate GUI.
   This is the entry point when the script is executed directly.
   """
-  app = PrefetchApp()
+  # Detect device type based on screen size
+  if gui_app.big_ui():
+    # C3 device (big screen: 2160x1080)
+    app = PrefetchAppC3()
+  else:
+    # C4 device (small screen: 536x240)
+    app = PrefetchAppC4()
+
   app.run()
 
   # Exit with success code

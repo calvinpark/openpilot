@@ -1,4 +1,4 @@
-# tsk/ui/widgets/header.py
+# tsk/c3/ui/widgets/header.py
 """
 TSK Header widget with navigation and status display.
 
@@ -6,13 +6,14 @@ Pure Widget architecture - NO platform detection needed.
 """
 
 from typing import Optional
+
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
-from tsk.ui import TSKWidget
-from tsk.ui.button import TSKButton
-from tsk.ui.layout import Theme
+from tsk.c3.ui.button import TSKButton
+from tsk.c3.ui.layout import Theme
 from tsk.common.key_file_manager import KeyFileManager
+from tsk.common.widget import TSKWidget
 
 
 class TSKHeader(TSKWidget):

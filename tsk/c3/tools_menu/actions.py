@@ -1,12 +1,12 @@
-# tsk/tools_menu/actions.py
+# tsk/c3/tools_menu/actions.py
 import traceback
 
 from tsk.common.env import RECOMMENDED_OP_BRANCH, RECOMMENDED_OP_USER
 from tsk.common.env import is_cache_dir_new, is_in_car
 from tsk.common.key_file_manager import KeyFileManager
-from tsk.tools_menu.extractor import NotAGNOSError, BoarddNotRunningError, RetryError, TSKExtractor
-from tsk.ui.dialog import OkayDialog
-from tsk.ui.dialog import YesNoDialog
+from tsk.c3.tools_menu.extractor import NotAGNOSError, BoarddNotRunningError, RetryError, TSKExtractor
+from tsk.c3.ui.dialog import OkayDialog
+from tsk.c3.ui.dialog import YesNoDialog
 
 
 def tsk_extractor_action():

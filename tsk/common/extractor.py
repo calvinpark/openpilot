@@ -11,7 +11,7 @@ from opendbc.car.structs import CarParams
 from opendbc.car.uds import UdsClient, ACCESS_TYPE, SESSION_TYPE, DATA_IDENTIFIER_TYPE, SERVICE_TYPE, \
   ROUTINE_CONTROL_TYPE, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
 from panda import Panda
-from tsk.common.env import is_agnos
+from tsk.common.env import is_agnos, PAYLOAD_PATH
 
 
 class NotAGNOSError(Exception):
@@ -196,7 +196,7 @@ class TSKExtractor:
       resp = uds_client._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=data)
 
       # Upload payload
-      payload = open("/data/openpilot/tsk/tools_menu/payload.bin", "rb").read()
+      payload = open(PAYLOAD_PATH, "rb").read()
       assert len(payload) == 0x1000
       chunk_size = 0x400
       for i in range(len(payload) // chunk_size):

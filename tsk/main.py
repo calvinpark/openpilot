@@ -1,75 +1,22 @@
 #!/usr/bin/env python3
 # tsk/main.py
 """
-TSK Manager main application.
+TSK Manager entry point.
 
-Pure Widget architecture - NO platform detection needed.
+Detects device type (C3X vs C4) and loads appropriate GUI.
 """
 
 import sys
+
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
-from tsk.ui import TSKWidget
-from tsk.ui.header import TSKHeader
-from tsk.ui.layout import Theme
-from tsk.tools_menu.ui import ToolsMenuUI
-from tsk.reboot_menu.ui import RebootMenuUI
 from tsk.common.env import is_calvins_c3x
 
-
-class TSKManager(TSKWidget):
-  """
-  Main TSK Manager application widget.
-
-  This is the top-level widget that manages:
-  - Header with navigation
-  - Menu switching
-  - Overall layout
-
-  NO platform detection needed - everything is Widget-based.
-  """
-
-  def __init__(self):
-    super().__init__()
-    self._current_menu = Theme.menu_tools
-
-    # Create child widgets
-    self.header = TSKHeader()
-    self.tools_menu = ToolsMenuUI()
-    self.reboot_menu = RebootMenuUI()
-
-  def _render(self, rect: rl.Rectangle):
-    """Render the TSK Manager UI."""
-    # Clear background
-    rl.clear_background(rl.BLACK)
-
-    # Render header
-    header_height = self.header.get_height()
-    header_rect = rl.Rectangle(rect.x, rect.y, rect.width, header_height)
-
-    # Update header's current menu
-    self.header.set_current_menu(self._current_menu)
-
-    # Render header and get navigation result
-    nav_result = self.header.render(header_rect)
-    if nav_result is not None:
-      self._current_menu = nav_result
-
-    # Render current menu
-    menu_rect = rl.Rectangle(
-      rect.x,
-      rect.y + header_height,
-      rect.width,
-      rect.height - header_height
-    )
-
-    if self._current_menu == Theme.menu_tools:
-      self.tools_menu.render_with_header_height(menu_rect, header_height)
-    elif self._current_menu == Theme.menu_reboot:
-      self.reboot_menu.render_with_header_height(menu_rect, header_height)
-
-    return True
+if gui_app.big_ui():
+  from tsk.c3.tsk_manager import TSKManager
+else:
+  from tsk.c4.tsk_manager import TSKManager
 
 
 def setup_environment():
@@ -95,8 +42,15 @@ def main():
   gui_app.init_window("TSK Manager")
   tskm = TSKManager()
 
-  for _ in gui_app.render():
-    tskm.render(rl.Rectangle(0, 0, gui_app.width, gui_app.height))
+  # Main render loop
+  for should_render_main in gui_app.render():
+    # gui_app.render() yields False when a modal overlay is active
+    # In that case, skip rendering the main content
+    if should_render_main:
+      # Clear background and render main content only when no modal overlay
+      rl.clear_background(rl.BLACK)
+      tskm.render(rl.Rectangle(0, 0, gui_app.width, gui_app.height))
+    # Modal overlay is automatically rendered by gui_app.render() before yielding
 
   rl.close_window()
   sys.exit(0)

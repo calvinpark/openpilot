@@ -1,4 +1,4 @@
-# tsk/tools_menu/keyboard.py
+# tsk/c3/tools_menu/keyboard.py
 """
 TSK Keyboard Dialog for entering hex keys.
 
@@ -9,7 +9,7 @@ import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
 from tsk.common.key_file_manager import KeyFileManager
-from tsk.ui.button import TSKButton
+from tsk.c3.ui.button import TSKButton
 
 
 class KeyboardDialog:

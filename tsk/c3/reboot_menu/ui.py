@@ -1,4 +1,4 @@
-# tsk/reboot_menu/ui.py
+# tsk/c3/reboot_menu/ui.py
 """
 Reboot Menu UI for TSK Manager.
 
@@ -8,11 +8,11 @@ Pure Widget architecture - NO platform detection needed.
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
+from tsk.c3.reboot_menu.actions import Rebooter
+from tsk.c3.ui.button import TSKButton
+from tsk.c3.ui.layout import Layout, Theme
 from tsk.common.env import RECOMMENDED_OP_USER, RECOMMENDED_OP_BRANCH, ALTERNATE_OP_USER, ALTERNATE_OP_BRANCH
-from tsk.reboot_menu.actions import Rebooter
-from tsk.ui import TSKWidget
-from tsk.ui.button import TSKButton
-from tsk.ui.layout import Layout, Theme
+from tsk.common.widget import TSKWidget
 
 
 class RebootMenuUI(TSKWidget):

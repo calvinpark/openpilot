@@ -1,4 +1,4 @@
-# tsk/tools_menu/ui.py
+# tsk/c3/tools_menu/ui.py
 """
 Tools Menu UI for TSK Manager.
 
@@ -8,11 +8,11 @@ Pure Widget architecture - NO platform detection needed.
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
-from tsk.tools_menu.actions import tsk_extractor_action, tsk_uninstaller_action, tsk_guide_action
-from tsk.tools_menu.keyboard import KeyboardDialog
-from tsk.ui import TSKWidget
-from tsk.ui.button import TSKButton
-from tsk.ui.layout import Layout, Theme
+from tsk.c3.tools_menu.actions import tsk_extractor_action, tsk_uninstaller_action, tsk_guide_action
+from tsk.c3.tools_menu.keyboard import KeyboardDialog
+from tsk.c3.ui.button import TSKButton
+from tsk.c3.ui.layout import Layout, Theme
+from tsk.common.widget import TSKWidget
 
 
 class ToolsMenuUI(TSKWidget):

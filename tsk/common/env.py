@@ -3,16 +3,22 @@ import os
 import time
 
 
-RECOMMENDED_OP_USER = "commaai"
-RECOMMENDED_OP_BRANCH = "nightly-dev"
-RECOMMENDED_OP_DIR = "/data/tsk-recommended"
-ALTERNATE_OP_USER = "sunnypilot"
-ALTERNATE_OP_BRANCH = "staging"
-ALTERNATE_OP_DIR = "/data/tsk-alternate"
-
-
 def is_agnos():
   return os.path.exists("/AGNOS")
+
+
+COMMA_DATA_DIR = "/data" if is_agnos() else f"{os.path.expanduser('~')}/comma_data"
+
+CONTINUE_FILE = f"{COMMA_DATA_DIR}/continue.sh"
+OPENPILOT_DIR = f"{COMMA_DATA_DIR}/openpilot"
+PAYLOAD_PATH = "/data/openpilot/tsk/common/payload.bin"
+
+RECOMMENDED_OP_USER = "commaai"
+RECOMMENDED_OP_BRANCH = "nightly-dev"
+RECOMMENDED_OP_DIR = f"{COMMA_DATA_DIR}/tsk-recommended"
+ALTERNATE_OP_USER = "sunnypilot"
+ALTERNATE_OP_BRANCH = "staging"
+ALTERNATE_OP_DIR = f"{COMMA_DATA_DIR}/tsk-alternate"
 
 
 def is_calvins_c3x() -> bool:

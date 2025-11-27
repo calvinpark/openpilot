@@ -1,4 +1,4 @@
-# tsk/ui/widgets/button.py
+# tsk/c3/ui/widgets/button.py
 """
 TSK Button widget.
 
@@ -7,11 +7,11 @@ NO platform detection needed - Widget handles everything cross-platform.
 """
 
 from typing import Callable, List, Dict, Any, Optional
+
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
-from tsk.ui import TSKWidget
-from tsk.ui.layout import Theme
+from tsk.common.widget import TSKWidget
 
 
 class TSKButton(TSKWidget):

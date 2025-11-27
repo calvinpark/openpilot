@@ -1,12 +1,12 @@
-# tsk/reboot_menu/actions.py
+# tsk/c3/reboot_menu/actions.py
 import os
 import shutil
 import sys  # Import the sys module
 
+from tsk.c3.ui.dialog import YesNoDialog
 from tsk.common.env import is_agnos, RECOMMENDED_OP_USER, RECOMMENDED_OP_BRANCH, RECOMMENDED_OP_DIR, ALTERNATE_OP_USER, \
   ALTERNATE_OP_BRANCH, ALTERNATE_OP_DIR
 from tsk.common.key_file_manager import KeyFileManager
-from tsk.ui.dialog import YesNoDialog
 
 
 class Rebooter:

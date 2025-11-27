@@ -5,8 +5,8 @@ import re
 import threading
 import time
 
+from tsk.c3.ui.layout import Theme
 from tsk.common.env import is_agnos
-from tsk.ui.layout import Theme
 
 
 class KeyFileManager:

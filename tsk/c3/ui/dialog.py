@@ -1,4 +1,4 @@
-# tsk/ui/widgets/dialog.py
+# tsk/c3/ui/widgets/dialog.py
 """
 TSK Dialog widgets for full-screen dialogs with scrollable text.
 
@@ -6,12 +6,13 @@ Pure Widget architecture - NO platform detection needed.
 """
 
 from typing import Optional
+
 import pyray as rl
 
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.scroll_panel import GuiScrollPanel
-from tsk.ui import TSKWidget
-from tsk.ui.button import TSKButton
+from tsk.c3.ui.button import TSKButton
+from tsk.common.widget import TSKWidget
 
 # Default font size for dialog buttons
 DEFAULT_BUTTON_FONT_SIZE = 50

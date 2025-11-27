@@ -1,4 +1,4 @@
-# tsk/ui/widgets/__init__.py
+# tsk/common/widget.py
 """
 TSK Widget abstraction layer.
 
