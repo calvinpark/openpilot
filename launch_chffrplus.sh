@@ -78,6 +78,13 @@ function launch {
   # write tmux scrollback to a file
   tmux capture-pane -pq -S-1000 > /tmp/launch_log
 
+  # TSK: prefetch recommended and alternate openpilot branches
+  cd $DIR
+  python3 tsk/prefetch.py
+
+  # TSK: start web server before the manager so it survives manager kills
+  python3 -m tsk.web.server &
+
   # start manager
   cd openpilot/system/manager
   if [ ! -f $DIR/prebuilt ]; then

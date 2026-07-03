@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TSK Manager</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        min-height: 100vh;
+      }
+
+      .page {
+        width: min(100vw, 460px);
+        margin: 0 auto;
+        padding: 0 0 24px;
+      }
+
+      .page-header {
+        padding: 16px 20px 12px;
+      }
+
+      .page-title {
+        font-size: 28px;
+        font-weight: 700;
+      }
+
+      .page-url {
+        font-size: 13px;
+        color: #8e8e93;
+        margin-top: 2px;
+        overflow-wrap: anywhere;
+      }
+
+      .status-area {
+        padding: 14px 20px;
+      }
+
+      .status-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 6px;
+      }
+
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #ffcc00;
+        flex-shrink: 0;
+      }
+
+      .status-dot.good { background: #34c759; }
+      .status-dot.bad { background: #ff3b30; }
+
+      .status-title {
+        font-size: 17px;
+        font-weight: 600;
+      }
+
+      .status-key {
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 13px;
+        color: #8e8e93;
+        letter-spacing: 1px;
+        line-height: 1.8;
+      }
+
+      .section-label {
+        margin: 20px 16px 6px 20px;
+        font-size: 13px;
+        font-weight: 400;
+        color: #6d6d72;
+        text-transform: uppercase;
+      }
+
+      .group {
+        margin: 0 16px;
+        background: #fff;
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      .group-item {
+        display: block;
+        width: 100%;
+        padding: 12px 16px;
+        border: none;
+        border-bottom: 0.5px solid #c6c6c8;
+        background: #fff;
+        color: #1c1c1e;
+        text-align: left;
+        text-decoration: none;
+        font: inherit;
+        font-size: 17px;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .group-item:last-child {
+        border-bottom: none;
+      }
+
+      .group-item:active {
+        background: #e5e5ea;
+      }
+
+      .group-item.action {
+        color: #007aff;
+      }
+
+      .group-item.danger {
+        color: #ff3b30;
+      }
+
+      .group-item .chevron {
+        color: #c7c7cc;
+        font-size: 20px;
+        font-weight: 300;
+        margin-left: 8px;
+      }
+
+      /* --- Modal --- */
+
+      .modal-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.4);
+        z-index: 100;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      }
+
+      .modal-overlay.visible {
+        display: flex;
+      }
+
+      .modal {
+        background: #fff;
+        border-radius: 14px;
+        width: min(100%, 300px);
+        text-align: center;
+        overflow: hidden;
+      }
+
+      .modal-content {
+        padding: 20px 16px;
+        text-align: left;
+      }
+
+      .modal-title {
+        font-size: 17px;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+
+      .modal-body {
+        font-size: 13px;
+        color: #8e8e93;
+        line-height: 1.4;
+        white-space: pre-wrap;
+      }
+
+      .modal-buttons {
+        display: flex;
+        border-top: 0.5px solid #c6c6c8;
+      }
+
+      .modal-btn {
+        flex: 1;
+        padding: 12px;
+        border: none;
+        background: none;
+        font: inherit;
+        font-size: 17px;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .modal-btn:active {
+        background: #e5e5ea;
+      }
+
+      .modal-btn + .modal-btn {
+        border-left: 0.5px solid #c6c6c8;
+      }
+
+      .modal-btn.cancel {
+        color: #007aff;
+      }
+
+      .modal-btn.confirm {
+        color: #007aff;
+        font-weight: 600;
+      }
+
+      .modal-btn.confirm-danger {
+        color: #ff3b30;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header">
+        <div class="page-title">TSK Manager</div>
+        <div class="page-url" id="webUrl">http://tsk.local:11111</div>
+      </header>
+
+      <div class="status-area">
+        <div class="status-row">
+          <div class="status-dot" id="keyLight"></div>
+          <div class="status-title" id="keyTitle">Key not installed</div>
+        </div>
+        <div class="status-key" id="keyDetail">Run TSK Extractor.</div>
+      </div>
+
+      <div class="section-label">Tools</div>
+      <div class="group">
+        <a class="group-item action" href="/extractor.html">
+          TSK Extractor
+          <span class="chevron">›</span>
+        </a>
+        <button class="group-item danger" type="button" id="uninstallBtn">Uninstall key</button>
+      </div>
+
+      <div class="section-label">Reboot</div>
+      <div class="group">
+        <button class="group-item" type="button" id="recommendedBtn">Install recommended</button>
+        <button class="group-item" type="button" id="alternateBtn">Install alternate</button>
+        <button class="group-item" type="button" id="differentBtn">Install a different fork/branch</button>
+        <button class="group-item" type="button" id="retryBtn">Reboot to try again</button>
+      </div>
+    </main>
+
+    <div class="modal-overlay" id="modalOverlay">
+      <div class="modal">
+        <div class="modal-content">
+          <div class="modal-title" id="modalTitle"></div>
+          <div class="modal-body" id="modalBody"></div>
+        </div>
+        <div class="modal-buttons" id="modalButtons"></div>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        key: "",
+        running: false,
+        reboot: {},
+      };
+
+      const els = {
+        webUrl: document.getElementById("webUrl"),
+        keyLight: document.getElementById("keyLight"),
+        keyTitle: document.getElementById("keyTitle"),
+        keyDetail: document.getElementById("keyDetail"),
+        uninstallBtn: document.getElementById("uninstallBtn"),
+        recommendedBtn: document.getElementById("recommendedBtn"),
+        alternateBtn: document.getElementById("alternateBtn"),
+        differentBtn: document.getElementById("differentBtn"),
+        retryBtn: document.getElementById("retryBtn"),
+        modalOverlay: document.getElementById("modalOverlay"),
+        modalTitle: document.getElementById("modalTitle"),
+        modalBody: document.getElementById("modalBody"),
+        modalButtons: document.getElementById("modalButtons"),
+      };
+
+      function formatKey(hex) {
+        const groups = hex.match(/.{1,4}/g) || [];
+        const half = Math.ceil(groups.length / 2);
+        return groups.slice(0, half).join(" ") + "\n" + groups.slice(half).join(" ");
+      }
+
+      function setKey(key) {
+        state.key = key || "";
+        if (state.key) {
+          els.keyLight.className = "status-dot good";
+          els.keyTitle.textContent = "Key installed";
+          els.keyDetail.textContent = formatKey(state.key);
+        } else {
+          els.keyLight.className = "status-dot";
+          els.keyTitle.textContent = "Key not installed";
+          els.keyDetail.textContent = "Run TSK Extractor.";
+        }
+      }
+
+      function renderLabel(btn, text) {
+        const m = text.match(/^(Install\s+)(\S+\/\S+)$/);
+        if (m) {
+          btn.innerHTML = "";
+          btn.appendChild(document.createTextNode(m[1]));
+          const code = document.createElement("span");
+          code.style.fontFamily = '"SF Mono", ui-monospace, monospace';
+          code.textContent = m[2];
+          btn.appendChild(code);
+        } else {
+          btn.textContent = text;
+        }
+      }
+
+      function setRunning(running) {
+        state.running = running;
+        for (const btn of document.querySelectorAll("button")) {
+          btn.disabled = running;
+        }
+      }
+
+      // --- Modal ---
+
+      function renderWithWarnings(el, text) {
+        el.innerHTML = "";
+        const mono = '"SF Mono", ui-monospace, monospace';
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (i > 0) el.appendChild(document.createElement("br"));
+          let line = lines[i];
+          const warn = line.startsWith("!!!!");
+          if (warn) line = line.replace(/^!{4}\s*/, "");
+          if (!line) continue;
+          const parts = line.split(/(\S+\/\S+)/);
+          for (const part of parts) {
+            if (!part) continue;
+            const span = document.createElement("span");
+            span.textContent = part;
+            if (warn) span.style.color = "#ff3b30";
+            if (/^\S+\/\S+$/.test(part) && part !== "fork/branch" && part !== "fork/branch?") span.style.fontFamily = mono;
+            el.appendChild(span);
+          }
+        }
+      }
+
+      function showModal(title, body, buttons) {
+        renderWithWarnings(els.modalTitle, title);
+        renderWithWarnings(els.modalBody, body);
+        els.modalButtons.innerHTML = "";
+        for (const b of buttons) {
+          const btn = document.createElement("button");
+          btn.className = "modal-btn " + (b.className || "");
+          btn.textContent = b.label;
+          btn.addEventListener("click", b.onClick);
+          els.modalButtons.appendChild(btn);
+        }
+        els.modalOverlay.classList.add("visible");
+      }
+
+      function hideModal() {
+        els.modalOverlay.classList.remove("visible");
+      }
+
+      function showAlert(title, body) {
+        showModal(title, body, [
+          { label: "OK", className: "confirm", onClick: hideModal },
+        ]);
+      }
+
+      // --- API helpers ---
+
+      async function postJson(url, payload) {
+        const response = await fetch(url, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await response.json();
+        return { response, result };
+      }
+
+      function responseBody(result) {
+        if (result.traceback) {
+          return `${result.message}\n\n${result.traceback}`;
+        }
+        return result.message || "No details returned.";
+      }
+
+      // --- Polling ---
+
+      async function loadHealth() {
+        try {
+          const response = await fetch("/api/health", { cache: "no-store" });
+          const health = await response.json();
+          els.webUrl.textContent = health.url || `http://${location.hostname || "tsk.local"}:${health.port}`;
+        } catch (err) {
+          els.webUrl.textContent = "server offline";
+        }
+      }
+
+      async function loadStatus() {
+        try {
+          const response = await fetch("/api/status", { cache: "no-store" });
+          const status = await response.json();
+          setKey(status.key);
+        } catch (err) {
+          /* polling failure, ignore */
+        }
+      }
+
+      async function loadRebootActions() {
+        try {
+          const response = await fetch("/api/reboot", { cache: "no-store" });
+          const actions = await response.json();
+          state.reboot = actions;
+          if (actions.recommended) renderLabel(els.recommendedBtn, actions.recommended.label);
+          if (actions.alternate) renderLabel(els.alternateBtn, actions.alternate.label);
+          if (actions.different) renderLabel(els.differentBtn, actions.different.label);
+          if (actions.retry) renderLabel(els.retryBtn, actions.retry.label);
+        } catch (err) {
+          /* polling failure, ignore */
+        }
+      }
+
+      async function refreshState() {
+        await loadStatus();
+        await loadRebootActions();
+      }
+
+      // --- Uninstall ---
+
+      els.uninstallBtn.addEventListener("click", () => {
+        if (state.running) return;
+        if (!state.key) {
+          showAlert("Key not installed", "Nothing to do.");
+          return;
+        }
+        const spaced = state.key.replace(/.{4}/g, "$& ").trim();
+        showModal("Uninstall key?", "Key: " + spaced, [
+          { label: "Cancel", className: "cancel", onClick: hideModal },
+          { label: "Uninstall", className: "confirm-danger", onClick: doUninstall },
+        ]);
+      });
+
+      async function doUninstall() {
+        hideModal();
+        try {
+          const { response, result } = await postJson("/api/uninstall", {});
+          setKey(result.key);
+          await loadRebootActions();
+          if (!response.ok) {
+            showAlert(result.title || "Uninstall failed", responseBody(result));
+          }
+        } catch (err) {
+          showAlert("Unexpected error", String(err));
+        }
+      }
+
+      // --- Reboot actions ---
+
+      function confirmReboot(action) {
+        return async () => {
+          if (state.running) return;
+          await refreshState();
+          const details = state.reboot[action] || {};
+          showModal(details.label || "Confirm action", details.prompt || "Confirm?", [
+            { label: "Cancel", className: "cancel", onClick: hideModal },
+            { label: "Confirm", className: "confirm", onClick: () => doReboot(action) },
+          ]);
+        };
+      }
+
+      async function doReboot(action) {
+        hideModal();
+        setRunning(true);
+        try {
+          const { response, result } = await postJson("/api/reboot", { action });
+          setKey(result.key);
+          await loadRebootActions();
+          if (!response.ok) {
+            showAlert(result.title || "Action failed", responseBody(result));
+          }
+        } catch (err) {
+          showAlert("Unexpected error", String(err));
+        } finally {
+          setRunning(false);
+        }
+      }
+
+      els.recommendedBtn.addEventListener("click", confirmReboot("recommended"));
+      els.alternateBtn.addEventListener("click", confirmReboot("alternate"));
+      els.differentBtn.addEventListener("click", confirmReboot("different"));
+      els.retryBtn.addEventListener("click", confirmReboot("retry"));
+
+      // --- Init ---
+
+      loadHealth();
+      refreshState();
+      setInterval(loadHealth, 5000);
+      setInterval(refreshState, 5000);
+    </script>
+  </body>
+</html>
