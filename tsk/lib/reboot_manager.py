@@ -105,6 +105,12 @@ class RebootManager:
         **self.key_status_payload(),
       }
 
+    # recommended/alternate rewrite /data/openpilot, the tree a live manager runs
+    # from. Stop it first so the rmtree/move isn't pulled out from under it — the
+    # matcher path can reach here with manager still alive (it doesn't kill it).
+    if action in ("recommended", "alternate"):
+      self._stop_manager()
+
     if action == "recommended":
       shutil.rmtree(OPENPILOT_DIR, ignore_errors=True)
       print(f"Removed {OPENPILOT_DIR}", flush=True)
@@ -138,6 +144,17 @@ class RebootManager:
       "message": "Action confirmed. Reboot requested.",
       **self.key_status_payload(),
     }
+
+  @staticmethod
+  def _stop_manager() -> None:
+    # Kill the manager (and pandad) before rewriting /data/openpilot so a live
+    # manager isn't running from the tree we delete/move. tskweb is independent
+    # and survives; SIGKILL skips manager_cleanup, and the reboot below recovers.
+    import subprocess
+    import time
+    subprocess.run(["pkill", "-9", "-f", "manager.py"], check=False)
+    subprocess.run(["pkill", "-9", "-f", "pandad"], check=False)
+    time.sleep(2)
 
   @staticmethod
   def request_reboot() -> None:

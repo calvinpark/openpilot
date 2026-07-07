@@ -2,133 +2,148 @@
 
 ## Background
 
-comma.ai makes DIY ADAS devices. Current devices are comma threeX (C3X/tizi) and comma four (C4/mici). Toyota added cryptographic SecOC signatures to CAN messages, blocking comma from writing to the bus.
+comma.ai makes DIY ADAS devices — currently the comma threeX (C3X / tizi) and comma four (C4 / mici). Toyota added cryptographic SecOC signatures to CAN messages, blocking comma from writing to the bus.
 
-Willem (ex-comma) found a way to extract the SecOC key from the EPS firmware on 2021-23 RAV4 Prime. The same hack works on 2021-23 Sienna Hybrid, and with modifications on Yaris. Calvin built TSK Manager (TSKM) as a GUI around Willem's script. Details in `/Users/calvin/GitRepos/docs/README.md`.
+Willem (ex-comma) found a way to pull the SecOC key from the EPS firmware on 2021–23 RAV4 Prime; the same hack works on 2021–23 Sienna Hybrid, and with modifications on Yaris. TSKM is Calvin's GUI around Willem's method. Background in `/Users/calvin/GitRepos/docs/README.md`.
 
-Calvin's cars: 2023 Sienna Hybrid (C3X), 2023 Bolt EV 2LT (C4). Both devices test against the Sienna for TSKM validation.
+Calvin's cars: 2023 Sienna Hybrid (C3X), 2023 Bolt EV 2LT (C4). Both devices validate against the Sienna.
 
 ## Architecture
 
-This is the `tskmweb` branch, based on `commaai/nightly-dev`. It replaces the old RayLib GUI (`tskm` branch) with a local web app.
+The `tskmloop` branch, based on `commaai/nightly-dev`, replaces the old RayLib GUI (`tskm` branch) with a local phone-first web app on port `11111`.
 
 ### Boot Flow
 
-`launch_chffrplus.sh` runs on device boot:
+`launch_chffrplus.sh` on device boot:
 
-1. Sets up `/cache/tsk` dev asset symlink.
-2. Runs `python3 tsk/prefetch.py` — standalone RayLib GUI that clones recommended/alternate openpilot branches. Blocks until done.
-3. Starts the openpilot manager, which starts the `tskweb` process (`tsk.web.server`).
-4. Web UI available at `http://<device-ip>:11111`.
+1. Creates `/cache/tsk` and chowns it to comma — the server runs as comma but `/cache` is root-owned, so the dir its jobs write to (dumps, oracle) must exist first. Recreated each boot; `/cache` clears on AGNOS update.
+2. Runs `python3 tsk/prefetch.py` — standalone RayLib GUI that clones the recommended/alternate openpilot branches. Blocks until done.
+3. Starts `tsk.web.server` in the background, *before* the manager, so it survives the pipeline's `pkill manager.py`.
+4. Starts the openpilot manager (`./manager.py`) from the nested `openpilot/` tree.
+5. UI at `http://<device-ip>:11111`.
+
+`/data/openpilot` (the `tskmloop` checkout) is a **wrapper**: `tsk/` (this app) plus a nested `openpilot/` (a full bundled openpilot the device drives with). Installing `recommended`/`alternate` `rmtree`s + `move`s `/data/openpilot`, replacing the wrapper with a plain openpilot; `RebootManager.execute()` kills the manager first (`_stop_manager()`) so it isn't running from the tree being moved. "Install a different fork/branch" deletes `/data/continue.sh` (the AGNOS boot pointer, `cd /data/openpilot && exec ./launch_openpilot.sh`), dropping the device to the comma installer.
 
 ### File Layout
 
-- `tsk/prefetch.py`: standalone RayLib prefetch GUI. Not managed by the manager. Detects C3X vs C4 screen size.
-- `tsk/lib/`: TSKM behavior. All shared logic belongs here.
-  - `env.py`: paths, branch constants, device detection.
-  - `extractor.py`: SecOC key extraction via UDS/CAN. Calls `flash_panda()` for firmware recovery.
-  - `key_file_manager.py`: key read/write/delete, `format_key()`.
-  - `reboot_manager.py`: reboot/install actions with key status prompts.
-  - `payload.bin`: EPS firmware payload.
-- `tsk/web/`: HTTP and static web UI only.
-  - `server.py`: Python stdlib `ThreadingHTTPServer` on port `11111`.
-  - `static/index.html`: phone-first main page (iOS Settings design).
-  - `static/extractor.html`: TSK Extractor page (dark terminal, auto-runs on load).
+- `tsk/prefetch.py` — standalone RayLib prefetch GUI (not manager-managed). Detects C3X vs C4 screen size.
+- `tsk/lib/` — all TSKM behavior; shared logic lives here.
+  - `env.py` — paths, branch constants, device detection: `is_agnos`, `CACHE_DIR` (`/cache` on device, `~/comma_data/cache` off), `DATAFLASH_DIR`, `DATAFLASH_PAYLOAD_PATH`, `CAN_MESSAGES_DIR`, `CAN_ORACLE_PATH`, and the recommended (`commaai/nightly-dev`) / alternate (`sunnypilot/staging`) install targets.
+  - `extractor.py` — legacy single-step extraction (Willem). `hack()` uploads `payload.bin`, dumps RAM `0xFEBE6E34–0xFEBE6FF4`, parses KEY_4. `_connect_panda()` stashes the handle; `_close_panda()` releases it from the server's `finally`. pandad flashes the panda firmware on boot, so there's no flash call here.
+  - `dump_dataflash.py` — DataFlash dump (the 2021+ path). `dump(progress_cb)` uploads `payload_dataflash_ff200000_ff208000.bin` and dumps `0xFF200000–0xFF208000` (32 KB), returning `{status, frames, bytes, total, dump_path, message}`. `_finalize()` (pure, off-device testable) classifies the outcome:
+    - **complete** — full 32768 bytes; writes `dump_ff200000_ff208000.bin`.
+    - **partial** — the key window `KNOWN_KEY_OFFSET` (0x6e14) is captured but not the full range; writes the `.partial` sidecar Find can use.
+    - **key_missed** — the key window wasn't captured (one frame or nearly all of it); writes nothing, asks for a re-dump.
 
-`tsk/common`, `tsk/c3`, `tsk/c4` should not exist on `tskmweb`.
+    `_finalize()` returns the three statuses above; the server's job thread sets `failed` on an unhandled exception. `is_agnos`-gated. Shares the UDS session preamble with `extractor.py` by deliberate duplication (distinct payload, range, and parser, kept independently testable).
+  - `collect_can.py` — CAN oracle capture. `collect(progress_cb)` records sync (0x0F) + protected (0x2E4/0x131/0x344) frames on buses 0/2 in READY Mode until both targets are met (sync is the bottleneck; protected floods), capped at 60 s; writes `can_oracle.ndjson`; returns `{status, sync, protected, ...}` (complete | insufficient; the server sets `failed` on an unhandled exception). `count_oracle_frames()` tallies a persisted oracle, skipping malformed lines. `is_agnos`-gated.
+  - `matcher.py` — key finder. `run()` reads the oracle + the dump (complete file, else the `.partial` sidecar, setting `dump_partial`) and calls `find_key()`: exhaustive stride-1 scan over every window, 5-sample sync union first pass, accept at ≥ `MATCH_FLOOR` (30) matches with ≥ 2 sync. Hand-rolled RFC-4493 AES-CMAC that computes the same 28-bit SecOC MAC as opendbc `secoc.py` (opendbc uses the pycryptodome `CMAC` library; the MAC values match, the code is a reimplementation). Pure computation; returns the key, does not install it.
+  - `key_file_manager.py` — key read/write/delete, `format_key()`.
+  - `reboot_manager.py` — reboot/install actions with key-status prompts.
+  - `payload.bin` — legacy extraction payload.
+  - `payload_dataflash_ff200000_ff208000.bin` — DataFlash dump payload (SHA256 `d48988366b…a06e34`, verified before use; byte-identical to Willem's I-CAN-hack/secoc `while-loop` branch).
+- `tsk/web/` — HTTP + static UI only.
+  - `server.py` — Python stdlib `ThreadingHTTPServer` on `11111`.
+  - `static/index.html` — phone-first main page (iOS Settings design).
+  - `static/extractor.html` — legacy TSK Extractor page (dark terminal, auto-runs on load).
+  - `static/can-collector.html` — CAN page; POSTs to start the real job, polls `/api/can-status`. Short-circuits a complete oracle, attaches to a running one, retries after insufficient/failed.
+  - `static/dataflash-collector.html` — DataFlash page; same pattern against `/api/dataflash-status`.
+
+`tsk/common`, `tsk/c3`, `tsk/c4` should not exist on `tskmloop`.
 
 ### Web Server
 
-Binds `0.0.0.0:11111`. Serves frozen assets from `tsk/web/static`, dev assets from `tsk/dev/web/static` when `/cache/tsk` is linked. Writes the device URL into `Offroad_NoFirmware` so the comma screen shows it.
+Binds `0.0.0.0:11111`. Serves frozen assets from `tsk/web/static`. Writes the device URL into `Offroad_NoFirmware` (via the background `offroad_alert_loop`) so the comma screen shows it — rewritten when the URL changes or the file is gone, since the manager wipes it on start.
 
-API endpoints: `/api/health`, `/api/status`, `/api/reboot`, `/api/extract`, `/api/uninstall`.
+API endpoints:
 
-Imports from `tsk/lib`: `TSKExtractor.hack()`, `KeyFileManager`, `RebootManager`, `format_key()`, `is_agnos`.
+- `/api/health` (GET) — server info, dry_run flag, detected addresses.
+- `/api/status` (GET) — key install status via `RebootManager.key_status_payload()`.
+- `/api/reboot` (GET/POST) — GET lists reboot actions, POST executes one.
+- `/api/extract` (POST) — legacy single-step extraction. Off-AGNOS dry run cycles 3 scenarios.
+- `/api/uninstall` (POST) — removes the installed key via `KeyFileManager`.
+- `/api/can-status` (GET) — `{ready, status, sync_count, protected_count, seconds, message}` from `can_state`. `ready == (status == "complete")`.
+- `/api/can-collect` (POST) — starts the background collect job, returns immediately. 409 if a panda op is already running. Off-AGNOS: mock ramp.
+- `/api/dataflash-status` (GET) — `{ready, status, frames, bytes, total, message, size}` from `df_state`. `partial` is a key-region-covered dump Find accepts; `key_missed` writes no file (re-dump).
+- `/api/dataflash-dump` (POST) — starts the background dump job, returns immediately. 409 if a dump is in progress. Off-AGNOS: `dump()` raises `NotAGNOSError` and the job falls back to a mock ramp.
+- `/api/match` (POST) — runs `matcher.run()`; on `found` installs the key via `KeyFileManager` and returns it with a screenshot message (modal title "Success!"), for a complete or partial recovery alike. Otherwise returns status + counts + debug fields (`windows_scanned`, `survivors`, best-candidate `address`, `dump_partial`) for the not-found modal. 500 with traceback on unhandled exception. 409 if a match is already running.
+- `/api/clear-cache` (POST) — `clear_can()` deletes the CAN oracle file and `clear_dataflash()` deletes the dump + `.partial` (each also resets its in-memory state). 409 while a dump/collect runs. Does not touch the key.
+
+CAN and DataFlash run as real background jobs: `can_state`/`can_lock` and `df_state`/`df_lock` hold live progress; threads run `collect()` / `dump()`, set `status="failed"` on any unhandled exception, and `start_*_job()` reject a concurrent start. A single `panda_lock` serializes extract/dump/collect over the one physical panda — held for the whole operation and released in the job's `finally`, which also calls `TSKExtractor._close_panda()`. `rehydrate_can_state()` and `rehydrate_dataflash_state()` run in `main()` so persisted CAN/dump data shows as done after a restart.
 
 ### Hard Rules
 
-`tsk/web/server.py` is HTTP routing only. Do not add key paths, key validation, key read/write, device detection, extractor wrappers, or reboot file operations. If behavior exists in `tsk/lib`, call it. If it doesn't, add it to `tsk/lib` or ask first.
-
-Do not invent alternate key storage — use `KeyFileManager`.
+`tsk/web/server.py` is HTTP routing only. Do not add key paths, key validation, key read/write, device detection, extractor wrappers, or reboot file ops. If behavior exists in `tsk/lib`, call it; if it doesn't, add it to `tsk/lib` or ask first. Do not invent alternate key storage — use `KeyFileManager`.
 
 ### Storage
 
 - Frozen code: `/data/openpilot/tsk`
-- Dev hot-reload assets: `/cache/tsk`
+- CAN oracle: `/cache/tsk/can-messages/can_oracle.ndjson`
+- DataFlash dumps: `/cache/tsk/dataflash/` — `dump_ff200000_ff208000.bin` (exactly 32768 bytes; the matcher prefers it) or a `.partial` sidecar (key window captured, full range not)
 - Prefetched repos: `/data/tsk-recommended`, `/data/tsk-alternate`
+
+All of `/cache` survives reboot and clears on AGNOS update.
+
+### UI State
+
+`index.html` has two extraction sections:
+
+**"2021, 2022, 2023 RAV4 Prime & Sienna"** — single TSK Extractor link (`extractor.html`), the legacy single-step RAM extraction. Kept as-is.
+
+**"2021+"** — the three-step pipeline (CAN → DataFlash → Find), all real:
+
+- **CAN row** — detail line `Sync N/50   Protected N/30`; links to `can-collector.html`.
+- **DataFlash row** — dot green on complete, **yellow** (`prereq-dot warn`) on a key-region-covered `partial`, red otherwise. `setDfDetail()` shows gray `Dumping N/total` while running, orange `partial`, red `key_missed`; hidden when idle/complete/failed (a failure shows the red dot alone — the error already appeared on the dump page). Links to `dataflash-collector.html`.
+- **Find Toyota Security Key** — disabled with "(need CAN)" / "(need DataFlash)" / "(need CAN & DataFlash)" until CAN is collected and a dump exists (complete **or** key-region `partial`). Running shows a darkened overlay + spinner ("Finding key…", `showFinding()`); `updateExtraction()` early-returns while `state.running` so the 1 s poll can't clobber the run. Success → "Success!" modal; complete-dump miss → debug block (best candidate address/matches, windows scanned, bytes) + the #toyota-security report line; partial miss → "Key not found in the partial DataFlash dump."
+- **Clear extraction cache** — red when CAN or DataFlash data exists, gray otherwise; resets both via `/api/clear-cache`.
+- **Uninstall key** — red when a key is installed, gray otherwise.
+
+CAN targets: 50 sync, 30 protected — a **total** across 0x2E4/0x131/0x344, not gated per-address. Collection stops when both are met (cap 60 s); the progress bar tracks target completion, not elapsed time.
+
+### Method & Design Notes
+
+Durable rationale for why the pipeline is shaped this way:
+
+- **Car-agnostic — no model gate.** Any car the owner picks may run. The verifier is the safety net: a wrong car either fails security access (EPS not in the Willem family) or nothing verifies. A wrong 16-byte window clears a 28-bit sync MAC at 2⁻²⁸; with ≥ 2 sync samples a false install is 2⁻⁵⁶ — no bad install is possible. The only car-specific constant is `KNOWN_KEY_OFFSET = 0x6e14`, used only to classify a partial as usable vs `key_missed`.
+- **No candidate system.** Exhaustive stride-1 scan over every window (~32,753), one AES-CMAC each, sub-second — no entropy filtering, scoring, or caps. Survivors (expect 0–1) get full sync + protected verification. Acceptance is an absolute floor (`MATCH_FLOOR` 30, ≥ 2 sync), not a percentage: a wrong window reaching 30 is ~2⁻⁶⁶⁰.
+- **Three failure modes, kept distinct.** (1) Security access denied → EPS not in the exploit family. (2) Dump completes, nothing verifies → exploit works but the key isn't in `0xFF200000–0xFF208000` for this EPS. (3) Verify passes → key extracted.
+- **Key delivery.** `KeyFileManager` writes `/cache/params/SecOCKey` + Params `SecOCKey`; `card.py` reads both, gated on `CP.secOcRequired`, surviving the install `move`/reboot/AGNOS. Cars past their last-supported year need SunnyPilot with manual year selection (e.g. 2024 Sienna → pick 2023).
+- **Cold dumps often come back `partial`/`key_missed`; the fix is priming, not waiting.** Running the TSK Extractor first (the extraction exploit, which ends in `bl_reset`) makes the next dump complete; time alone does not. The lost data is a fixed-size (124-byte), moving, single-burst gap during the 8192-frame flood — an RX/USB-side overflow, not a structural EPS window (mechanism unresolved). Production keeps the dump as-is; users who can't get the key are told to run the Extractor first (manual prime), since the behavior may be Sienna-specific and most Sienna partials still capture the key.
+- **Extraction (RAM) vs dump (DataFlash).** The legacy extraction reads a firmware-specific RAM copy at `0xFEBE6E34` (per-car; fails the KEY_4 checksum on Yaris — "needs modifications"). The dump reads persistent DataFlash at `0xFF206E14`, whose layout is shared across these EPS variants — so it generalizes where the RAM extraction needs per-car addresses.
+- **DataFlash size.** The dump window is 32 KB; total DataFlash size is unverified (no RH850 part number). Every key seen is inside the window (Sienna/Yaris `0x6e14`; a `0x6410` candidate on the 2024-Sienna profile). A wider-range payload is ready-if-needed, not needed yet.
 
 ## Development
 
 ### Laptop (macOS)
 
-Unstaged patches in `system/manager/` let the manager run only `tskweb` on Darwin with `SIMULATION`. `SConstruct` skips modeld when ONNX files are absent. These are not committed.
-
-```bash
-source .venv/bin/activate
-./tools/sim/launch_openpilot.sh
-```
-
 Direct server test:
 
-```bash
+```
 python3 -m tsk.web.server
 ```
 
-Non-AGNOS dry run cycles through 3 extract scenarios: success (fake key), short error, long error with traceback.
-
-### Dev Assets on Device
-
-`launch_chffrplus.sh` creates `/cache/tsk/web/static` and symlinks `tsk/dev -> /cache/tsk`. Dev assets override frozen assets.
+Off-AGNOS: `/api/extract` dry-run cycles 3 scenarios (fake-key success, short error, long error with traceback). `dump()` / `collect()` raise `NotAGNOSError`, so the background jobs fall back to a **server-side mock ramp**; the collector pages poll the real status endpoints either way.
 
 ## Reference
 
-### Why TSKM Rebases on nightly-dev
-
-AGNOS updates are ~1GB and take ~10 minutes. Rebasing keeps TSKM current so users don't hit an AGNOS update mid-extraction. The web-app direction reduces dependence on comma's constantly-breaking RayLib GUI libs.
-
-### comma Release Branches
-
-- C3X (tizi): `release-tizi`
-- C4 (mici): `release-mici`
-- C3 (tici): `release-tici` (discontinued)
-- `release3`: older legacy branch
-
-### Versioned TSKM Branches
-
-Each release is tagged as a branch (e.g. `tskm-0.10.4`). Meant as frozen fallbacks, but comma changes can break them.
-
-### SSH Tips
-
-tmux detach on comma devices: backtick, then `d`.
+- **Why rebase on nightly-dev** — AGNOS updates are ~1 GB / ~10 min; rebasing keeps TSKM current so users don't hit one mid-extraction. The web-app direction also cuts dependence on comma's brittle RayLib libs.
+- **comma release branches** — C3X `release-tizi`, C4 `release-mici`, C3 `release-tici` (discontinued), `release3` (legacy).
+- **Versioned TSKM branches** — each release tagged as a branch (e.g. `tskm-0.10.4`); frozen fallbacks, but comma changes can break them.
+- **SSH** — tmux detach on comma devices: backtick, then `d`.
 
 ---
 
 ## Journal
 
-When the user says "update the journal", write a summary of what was done in the current session.
+When the user says "update the journal", add a dated entry summarizing the session.
 
-### 2025-11-15
+- **2025-11** — TSKM v0.10.4 shipped on the RayLib `tskm` branch.
+- **2026-04** — Fixed `CAN packet version mismatch` (stale panda firmware, killed before pandad could flash) with `flash_panda()` GPIO/DFU recovery, after a bare `panda.flash()` silently failed to persist on one DEV-firmware panda. Multiple users extracted successfully on the RayLib `tskm` branch. (Later superseded by pandad flashing on boot — no flash call in `hack()` now.)
+- **2026-07-02 → 07-08** — Built the `tskmloop` web app off `commaai/nightly-dev`: moved shared logic into `tsk/lib`, stdlib server on `11111`, phone-first `index.html`. Replaced the single-step extractor with the three-step **CAN → DataFlash → Find** pipeline; built `collect_can.py`, `dump_dataflash.py`, `matcher.py` and their real background jobs (`panda_lock` serialization, `rehydrate_*` on restart, `_close_panda`). Audited installer → boot → install → key-load end to end.
+- **2026-07-08 (in-car)** — First successful Sienna extraction end to end (key `f220…7098` at `0xff206e14`). The partial-dump path also recovered the key in-car. Added the key-region gate (`.partial` only when `0x6e14` is captured, else `key_missed`) and CAN early-stop (stop when both targets are met, not a fixed 60 s).
+- **2026-07-09 (prime, not time)** — Controlled in-car experiment: both prime variants dumped 32768/32768 (0 gaps, 2/2); time-only (60 s, no prime) partialed both times. The prime fixes cold partials; waiting does not. The gap is a fixed-size (124-byte) moving single burst → RX/USB-side, not structural (overturns the earlier "structural window" read). Decision (Calvin): keep the dump as-is; tell stuck users to run the Extractor first (manual prime), since the behavior may be Sienna-specific and most Sienna partials still capture the key.
+- **2026-07-09 (payload provenance)** — Traced the dataflash path to Willem's I-CAN-hack/secoc `while-loop` branch: the shipped payload is byte-identical to his `payload.bin` (same SHA256), and the driver, shellcode, and matcher are his. No third-party ("Bk2ol") code is used; the one non-Willem trace is the dump's session-flow timing (sleeps 0.5/0.7/1.0 + a `PROGRAMMING → PROGRAMMING` repeat) that differs from the extraction flow, and its origin isn't verifiable from the repos.
 
-Released TSK Manager v0.10.4 on `tskm` branch.
+**Current state.** Full pipeline validated in-car on the Sienna, complete and partial dumps. Car-agnostic; no EPS version guard anywhere.
 
-### 2026-04-09
-
-Fixed `RuntimeError: CAN packet version mismatch` — panda firmware was stale because TSKM killed boardd/pandad before they could flash it. Added `panda.flash()` to `TSKExtractor.hack()`. End-to-end test passed in car.
-
-### 2026-04-10
-
-Two users confirmed successful extraction with the fix on `calvinpark/tskm`.
-
-### 2026-04-15
-
-Third user had `DEV-18392c3e-RELEASE` panda firmware that wouldn't flash via `panda.flash()`. SPI writes accepted silently but didn't persist. Fix: replaced bare `panda.flash()` with `flash_panda()` from `selfdrive/pandad/pandad.py` which includes GPIO/DFU recovery.
-
-### 2026-07-02 / 2026-07-03
-
-Started `tskmweb` branch from `commaai/nightly-dev`.
-
-Moved shared logic from `tsk/common`, `tsk/c3`, `tsk/c4` into `tsk/lib`. Built Python stdlib web server at `tsk/web/server.py` (port `11111`). Phone-first web UI at `tsk/web/static/index.html` using iOS Settings design language. TSK Extractor split into separate page (`extractor.html`) with dark terminal, auto-runs on load.
-
-Server calls `TSKExtractor.hack()` directly, returns `{ok, key, message}`. Non-AGNOS dry run cycles through 3 scenarios. Prefetch is a standalone RayLib script (`tsk/prefetch.py`) launched from `launch_chffrplus.sh` before the manager starts — same as `tskm` branch.
-
-Verified locally on laptop. Next: on-device testing.
+**Open items.** (1) The `key_missed` message doesn't point at the manual-prime remedy, so a stuck user loops on cold dumps. (2) The prime mechanism (RX-buffer vs EPS send-rate) is unresolved. (3) EPS app-string capture on every run (the per-run hardware label) is still unimplemented. (4) Whether cold-partial behavior is Sienna-specific — only a non-Sienna in-car run answers it.

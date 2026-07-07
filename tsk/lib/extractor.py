@@ -70,16 +70,33 @@ class TSKExtractor:
   SECOC_KEY_SIZE = 0x10
   SECOC_KEY_OFFSET = 0x0c
 
-  @staticmethod
-  def _connect_panda():
-    """Connect to the panda. The manager's pandad has already flashed the firmware."""
+  _panda = None
+
+  @classmethod
+  def _connect_panda(cls):
+    """Connect to the panda. The manager's pandad has already flashed the firmware.
+    Stash the handle so the caller can close it after the operation (_close_panda)."""
     from panda import Panda
 
     panda_serials = Panda.list()
     if not panda_serials:
       raise PandaError("No panda found")
 
-    return Panda(panda_serials[0])
+    cls._panda = Panda(panda_serials[0])
+    return cls._panda
+
+  @classmethod
+  def _close_panda(cls) -> None:
+    """Close and forget the stashed panda handle, if any. Idempotent. Called from the
+    server's finally blocks so extract/dump/collect release the USB handle rather than
+    leaking it until GC. Safe because the panda mutex serializes the three operations."""
+    panda = cls._panda
+    cls._panda = None
+    if panda is not None:
+      try:
+        panda.close()
+      except Exception:
+        pass
 
   @classmethod
   def _get_key_struct(cls, data, key_no):

@@ -12,9 +12,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
+from tsk.lib.collect_can import collect as collect_can, count_oracle_frames, oracle_path as can_oracle_path, PROTECTED_TARGET, SYNC_TARGET
+from tsk.lib.dump_dataflash import DUMP_TOTAL, dump as dump_dataflash, dump_path
 from tsk.lib.env import is_agnos, setup
 from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
 from tsk.lib.key_file_manager import KeyFileManager, format_key
+from tsk.lib.matcher import run as run_matcher
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
 
 
@@ -24,8 +27,18 @@ ASSET_DIR = Path(__file__).resolve().with_name("static")
 OFFROAD_ALERT_PARAM = "Offroad_NoFirmware"
 OFFROAD_ALERT_INTERVAL = 5.0
 
+# Shared tail for the unexpected-error surfaces (extract + match). The leading
+# "!!!!" makes index.html's modal render it red; the extractor terminal prints it
+# verbatim. Kept in one place so the two paths can't drift.
+PING_REPORT = ("!!!! Unexpected error. Please take a screenshot, post it on "
+               "#toyota-security, and ping @calvinspark")
+
 last_alert_url: str | None = None
-extractor_lock = threading.Lock()
+# One physical panda: extract, dump, and collect must not run concurrently. Held
+# for the whole operation (extract in the request thread; dump/collect in their
+# job threads, released in the job's finally).
+panda_lock = threading.Lock()
+matcher_lock = threading.Lock()
 
 
 def append_address(addresses: list[str], ip: str) -> None:
@@ -160,7 +173,12 @@ def update_offroad_alert() -> None:
   global last_alert_url
 
   url = get_tsk_url()
-  if url == last_alert_url:
+  # The manager wipes Offroad_NoFirmware on start (CLEAR_ON_MANAGER_START) and on
+  # the onroad transition, out from under us. Rewrite when the URL changed or the
+  # file is gone — trusting last_alert_url alone masks the deletion and the alert
+  # never returns.
+  alert_path = get_params_dir() / OFFROAD_ALERT_PARAM
+  if url == last_alert_url and (url is None or alert_path.exists()):
     return
 
   try:
@@ -208,6 +226,239 @@ def content_type_for(path: Path) -> str:
 DRY_RUN_FAKE_KEY = "a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
 dry_run_counter = 0
 
+# CAN collection runs as a background job, mirroring the DataFlash job below.
+# can_state is the live progress the status endpoint reports; the collect thread
+# owns writes under can_lock. ready == (status == "complete").
+can_lock = threading.Lock()
+can_state = {
+  "ready": False,
+  "status": "idle",   # idle | running | complete | insufficient | failed
+  "sync_count": 0,
+  "protected_count": 0,
+  "seconds": 0.0,
+  "message": "",
+}
+
+# DataFlash dump runs as a background job. df_state is the live progress the
+# status endpoint reports; the dump thread owns writes to it under df_lock.
+# ready == (status == "complete") so the UI's existing green-dot gating holds.
+df_lock = threading.Lock()
+df_state = {
+  "ready": False,
+  "status": "idle",   # idle | running | complete | partial | key_missed | failed
+  "frames": 0,
+  "bytes": 0,
+  "total": DUMP_TOTAL,
+  "message": "",
+  "size": 0,
+}
+
+
+def _df_progress(status=None, frames=None, bytes_done=None, total=None, message=None) -> None:
+  with df_lock:
+    if status is not None:
+      df_state["status"] = status
+    if frames is not None:
+      df_state["frames"] = frames
+    if bytes_done is not None:
+      df_state["bytes"] = bytes_done
+    if total is not None:
+      df_state["total"] = total
+    if message is not None:
+      df_state["message"] = message
+
+
+def _run_dataflash_mock() -> None:
+  # Laptop dry run: ramp progress over a couple of seconds so the collector page
+  # shows movement, then land on complete. The partial/key_missed paths only happen
+  # on a real device.
+  for done in (4096, 8192, 16384, 24576, DUMP_TOTAL):
+    time.sleep(0.4)
+    _df_progress(status="running", frames=done // 4, bytes_done=done, total=DUMP_TOTAL)
+  with df_lock:
+    df_state.update(status="complete", frames=DUMP_TOTAL // 4, bytes=DUMP_TOTAL,
+                    total=DUMP_TOTAL, size=DUMP_TOTAL, ready=True,
+                    message=f"Dump complete: {DUMP_TOTAL} bytes (mock).")
+
+
+def _run_dataflash_job() -> None:
+  try:
+    result = dump_dataflash(progress_cb=_df_progress)
+    status = result.get("status", "failed")
+    with df_lock:
+      df_state.update(
+        status=status,
+        frames=result.get("frames", df_state["frames"]),
+        bytes=result.get("bytes", df_state["bytes"]),
+        total=result.get("total", DUMP_TOTAL),
+        message=result.get("message", ""),
+        ready=(status == "complete"),
+        size=result.get("bytes", 0) if status == "complete" else 0,
+      )
+  except NotAGNOSError:
+    _run_dataflash_mock()
+  except Exception as e:
+    with df_lock:
+      df_state.update(status="failed", message=str(e), ready=False, size=0)
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_dataflash_job() -> bool:
+  # panda_lock is the gate: a running extract/dump/collect holds it, so a
+  # concurrent dump is rejected here. The job thread releases it in its finally.
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with df_lock:
+    df_state.update(status="running", frames=0, bytes=0, total=DUMP_TOTAL,
+                    message="", ready=False, size=0)
+  try:
+    threading.Thread(target=_run_dataflash_job, name="tsk_dataflash_dump", daemon=True).start()
+  except Exception:
+    # The job thread never took ownership, so release the lock and clear the state
+    # here — otherwise panda_lock would wedge every panda op until a restart.
+    with df_lock:
+      df_state.update(status="failed", message="Could not start the dump job.", ready=False)
+    panda_lock.release()
+    return False
+  return True
+
+
+def clear_dataflash() -> bool:
+  # Refuse while a dump is in flight: a completing dump would otherwise re-set the
+  # state and re-write the file this clear just removed. Returns False if running.
+  with df_lock:
+    if df_state["status"] == "running":
+      return False
+    df_state.update(ready=False, status="idle", frames=0, bytes=0,
+                    total=DUMP_TOTAL, message="", size=0)
+  for path in (dump_path(), Path(str(dump_path()) + ".partial")):
+    try:
+      path.unlink()
+    except FileNotFoundError:
+      pass
+    except OSError:
+      pass
+  return True
+
+
+def rehydrate_dataflash_state() -> None:
+  # A completed dump persists on disk; reflect it after a restart so a finished
+  # dump doesn't show as not-done and prompt a needless re-dump. A complete dump
+  # is exactly DUMP_TOTAL bytes, so a truncated file can't masquerade as done.
+  try:
+    size = dump_path().stat().st_size
+  except OSError:
+    size = None
+  if size == DUMP_TOTAL:
+    with df_lock:
+      df_state.update(ready=True, status="complete", frames=DUMP_TOTAL // 4,
+                      bytes=DUMP_TOTAL, total=DUMP_TOTAL, size=DUMP_TOTAL,
+                      message="Dump complete.")
+    return
+  # No complete dump, but a .partial sidecar means a near-complete run is on disk.
+  # Reflect it as partial so Find stays enabled and the matcher falls back to it
+  # after a restart (it finds the key in the captured range or asks for a re-dump).
+  try:
+    Path(str(dump_path()) + ".partial").stat()
+  except OSError:
+    return
+  with df_lock:
+    df_state.update(ready=False, status="partial", total=DUMP_TOTAL,
+                    message="Partial dump on disk.\nTry the Find Toyota Security Key button.\n"
+                            "If it doesn't work, restart the car into Not Ready To Drive mode and dump again.")
+
+
+def _can_progress(seconds=None, sync=None, protected=None) -> None:
+  with can_lock:
+    if seconds is not None:
+      can_state["seconds"] = seconds
+    if sync is not None:
+      can_state["sync_count"] = sync
+    if protected is not None:
+      can_state["protected_count"] = protected
+
+
+def _run_can_mock() -> None:
+  # Laptop dry run: ramp counts over a couple of seconds, then land on complete.
+  for i in range(1, 7):
+    time.sleep(0.4)
+    _can_progress(seconds=i * 10.0, sync=i * 10, protected=i * 600)
+  with can_lock:
+    can_state.update(status="complete", ready=True, seconds=60.0,
+                     sync_count=60, protected_count=3600,
+                     message="Collected 60 sync and 3600 protected frames (mock).")
+
+
+def _run_can_job() -> None:
+  try:
+    result = collect_can(progress_cb=_can_progress)
+    status = result.get("status", "failed")
+    with can_lock:
+      can_state.update(
+        status=status,
+        sync_count=result.get("sync", can_state["sync_count"]),
+        protected_count=result.get("protected", can_state["protected_count"]),
+        message=result.get("message", ""),
+        ready=(status == "complete"),
+      )
+  except NotAGNOSError:
+    _run_can_mock()
+  except Exception as e:
+    with can_lock:
+      can_state.update(status="failed", message=str(e), ready=False)
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_can_job() -> bool:
+  # panda_lock is the gate: a running extract/dump/collect holds it, so a
+  # concurrent collect is rejected here. The job thread releases it in its finally.
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with can_lock:
+    can_state.update(status="running", sync_count=0, protected_count=0,
+                     seconds=0.0, message="", ready=False)
+  try:
+    threading.Thread(target=_run_can_job, name="tsk_can_collect", daemon=True).start()
+  except Exception:
+    # Same as the dump: release the lock and clear the state if the thread that
+    # would release it never starts.
+    with can_lock:
+      can_state.update(status="failed", message="Could not start the collection job.", ready=False)
+    panda_lock.release()
+    return False
+  return True
+
+
+def clear_can() -> bool:
+  # Refuse while a collection is in flight so a finishing job can't resurrect the
+  # oracle this clear just removed. Returns False if running.
+  with can_lock:
+    if can_state["status"] == "running":
+      return False
+    can_state.update(ready=False, status="idle", sync_count=0,
+                     protected_count=0, seconds=0.0, message="")
+  try:
+    can_oracle_path().unlink()
+  except FileNotFoundError:
+    pass
+  except OSError:
+    pass
+  return True
+
+
+def rehydrate_can_state() -> None:
+  # Reflect a persisted oracle as ready after a restart, mirroring the dump.
+  sync, protected = count_oracle_frames()
+  if sync >= SYNC_TARGET and protected >= PROTECTED_TARGET:
+    with can_lock:
+      can_state.update(ready=True, status="complete", sync_count=sync,
+                       protected_count=protected,
+                       message=f"Collected {sync} sync and {protected} protected frames.")
+
 
 class TSKWebHandler(BaseHTTPRequestHandler):
   server_version = "TSKWeb/0.1"
@@ -227,8 +478,9 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     elif scenario == 1:
       self._send_json({
         "ok": False,
-        "message": "boardd is not running.\n\nTry again. If the problem persists, turn off the car, "
-                   "put it back into 'Not Ready to Drive' mode, and then try again.",
+        "message": "pandad is not running.\n\nTry again. If the problem persists, turn off the car, "
+                   "put it back into 'Not Ready to Drive' mode, and then try again."
+                   f"\n\n{PING_REPORT}",
       }, status=HTTPStatus.CONFLICT)
     else:
       self._send_json({
@@ -259,10 +511,10 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     path = urlparse(self.path).path
 
     if path == "/api/extract":
-      if not extractor_lock.acquire(blocking=False):
+      if not panda_lock.acquire(blocking=False):
         self._send_json({
           "ok": False,
-          "message": "Extractor is already running.",
+          "message": "Another panda operation (dump or CAN collect) is in progress.",
         }, status=HTTPStatus.CONFLICT)
         return
 
@@ -278,14 +530,74 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         self._send_extract_dry_run()
         return
       except Exception as e:
-        msg = str(e)
         tb = traceback.format_exc()
         self._send_json({
           "ok": False,
-          "message": f"{msg}\n\n{tb}",
+          "message": f"{e}\n\n{tb}\n\n{PING_REPORT}",
         }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
       finally:
-        extractor_lock.release()
+        TSKExtractor._close_panda()
+        panda_lock.release()
+      return
+
+    if path == "/api/match":
+      if not matcher_lock.acquire(blocking=False):
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "Key finder is already running.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+
+      try:
+        result = run_matcher()
+        if result["status"] == "found":
+          KeyFileManager().install_key(result["key"])
+          # Same body for a complete or a partial recovery — the title carries
+          # "Success!", so the body opens straight at the key.
+          detail = (
+            f"Found at {result['address']} — {result['matches']} matches "
+            f"(sync {result['sync']}, protected {result['protected']})."
+          )
+          message = (
+            f"This is your key:\n{format_key(result['key'])}\n\n"
+            f"{detail}\n\n"
+            "Take a screenshot now."
+          )
+          self._send_json({
+            "ok": True,
+            "status": "found",
+            "key": result["key"],
+            "message": message,
+            **RebootManager.key_status_payload(),
+          })
+        else:
+          # Forward the matcher's debug fields; index.html builds the not-found
+          # debug block from these plus the dump/oracle counts it already polls.
+          self._send_json({
+            "ok": False,
+            "status": result["status"],
+            "message": result["message"],
+            "matches": result["matches"],
+            "sync": result["sync"],
+            "protected": result["protected"],
+            "address": result["address"],
+            "offset": result["offset"],
+            "windows_scanned": result["windows_scanned"],
+            "survivors": result["survivors"],
+            "malformed": result["malformed"],
+            "dump_partial": result["dump_partial"],
+          })
+      except Exception as e:
+        tb = traceback.format_exc()
+        self._send_json({
+          "ok": False,
+          "status": "error",
+          "message": f"{e}\n\n{tb}\n\n{PING_REPORT}",
+          "traceback": tb,
+        }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+      finally:
+        matcher_lock.release()
       return
 
     if path == "/api/uninstall":
@@ -326,6 +638,45 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
       return
 
+    if path == "/api/can-collect":
+      if not start_can_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A CAN collection or another panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
+    if path == "/api/dataflash-dump":
+      if not start_dataflash_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A DataFlash dump or another panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
+    if path == "/api/clear-cache":
+      with can_lock:
+        can_running = can_state["status"] == "running"
+      with df_lock:
+        df_running = df_state["status"] == "running"
+      if can_running or df_running:
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A collection or dump is in progress. Wait for it to finish, then clear.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      clear_can()
+      clear_dataflash()
+      self._send_json({"ok": True})
+      return
+
     self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
   def _handle_request(self, send_body: bool) -> None:
@@ -347,6 +698,18 @@ class TSKWebHandler(BaseHTTPRequestHandler):
 
     if path == "/api/status":
       self._send_json(RebootManager.key_status_payload(), send_body=send_body)
+      return
+
+    if path == "/api/can-status":
+      with can_lock:
+        payload = dict(can_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/dataflash-status":
+      with df_lock:
+        payload = dict(df_state)
+      self._send_json(payload, send_body=send_body)
       return
 
     if path == "/api/reboot":
@@ -407,6 +770,8 @@ class TSKWebServer(ThreadingHTTPServer):
 
 def main() -> None:
   setup()
+  rehydrate_dataflash_state()
+  rehydrate_can_state()
   update_offroad_alert()
   threading.Thread(target=offroad_alert_loop, name="tsk_offroad_alert", daemon=True).start()
 
