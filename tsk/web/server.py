@@ -368,7 +368,7 @@ level3_state = {
 # Send-key probe — one Willem key at level 0x03/0x04.
 sendkey_lock = threading.Lock()
 sendkey_state = {
-  "status": "idle",   # idle | running | unlocked | invalid_key | locked | denied | no_seed | unreachable | failed
+  "status": "idle",   # idle | running | unlocked | invalid_key | locked | denied | rejected | no_seed | unreachable | failed
   "last": "",
   "panda": "",
   "eps_bus": -1,

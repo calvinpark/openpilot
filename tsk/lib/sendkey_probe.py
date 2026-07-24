@@ -52,6 +52,7 @@ def send_willem_key(progress_cb=None) -> dict:
     "invalid_key" — NRC 0x35, the secret differs;
     "locked"      — NRC 0x36/0x37, security locked out;
     "denied"      — NRC 0x33;
+    "rejected"    — some other NRC (e.g. 0x22/0x24) — reported, no secret claim;
     "no_seed"     — the seed request itself was refused;
     "unreachable" | "failed".
   Raises NotAGNOSError off-device.
@@ -172,7 +173,10 @@ def send_willem_key(progress_cb=None) -> dict:
     elif e.error_code == 0x33:
       result["status"] = "denied"
     else:
-      result["status"] = "invalid_key"
+      # An NRC that isn't a clean invalid-key / lockout / denial (e.g. 0x22
+      # conditionsNotCorrect, 0x24 requestSequenceError). Report it without
+      # claiming the secret differs — that would misdirect to the firmware dump.
+      result["status"] = "rejected"
   except (InvalidServiceIdError, MessageTimeoutError) as e:
     result["send_key"] = f"{type(e).__name__}" + (f": {e}" if str(e) else "")
     result["status"] = "failed"
