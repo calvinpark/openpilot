@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DataFlash Diagnostics</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .page {
+        width: min(100vw, 460px);
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 100vh;
+      }
+
+      .back-bar { padding: 12px 20px; }
+
+      .back-link {
+        color: #007aff;
+        font-size: 17px;
+        text-decoration: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .back-link::before { content: "‹ "; }
+
+      .page-header { padding: 0 20px 12px; }
+
+      .page-title { font-size: 28px; font-weight: 700; }
+
+      .terminal {
+        margin: 0 16px 16px;
+        background: #1c1c1e;
+        border-radius: 12px;
+        padding: 16px;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        color: #e5e5ea;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .terminal .err { color: #ff453a; }
+      .terminal .ok { color: #30d158; }
+      .terminal .warn { color: #ff9f0a; }
+      .terminal .dim { color: #8e8e93; }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="back-bar">
+        <a class="back-link" href="/">TSK Manager</a>
+      </div>
+      <header class="page-header">
+        <div class="page-title">DataFlash Diagnostics</div>
+      </header>
+      <div class="terminal" id="terminal"></div>
+    </main>
+
+    <script>
+      const terminal = document.getElementById("terminal");
+
+      function termWrite(text, className) {
+        const span = document.createElement("span");
+        if (className) span.className = className;
+        span.textContent = text + "\n";
+        terminal.appendChild(span);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+
+      function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+      async function getStatus() {
+        const r = await fetch("/api/dataflash-diag-status", { cache: "no-store" });
+        return r.json();
+      }
+
+      function pad(s, n) {
+        s = String(s);
+        return s.length >= n ? s : s + " ".repeat(n - s.length);
+      }
+
+      function renderDiag(s) {
+        termWrite("");
+        termWrite("DataFlash Dump — Diagnostics", "ok");
+        termWrite("Panda: " + (s.panda || "?"));
+
+        termWrite("");
+        termWrite("EPS identity:");
+        if (!(s.identity || []).length) {
+          termWrite("  (none read)", "dim");
+        }
+        for (const it of (s.identity || [])) {
+          const label = pad(it.did + " " + it.name, 24);
+          if (it.hex) {
+            termWrite("  " + label + ": " + it.ascii + "  [" + it.hex + "]");
+          } else {
+            termWrite("  " + label + ": " + it.ascii, "warn");
+          }
+        }
+
+        termWrite("");
+        termWrite("Steps:");
+        for (const st of (s.steps || [])) {
+          const mark = st.ok ? "✓ " : "✗ ";
+          const line = "  " + mark + pad(st.name, 26) + " " + st.detail + "  (" + st.ms + "ms)";
+          termWrite(line, st.ok ? "" : "err");
+        }
+
+        if (s.failed_at) {
+          termWrite("");
+          termWrite("FAILED at: " + s.failed_at, "err");
+          if (s.exception) termWrite("  " + s.exception, "err");
+          if (s.traceback) { termWrite(""); termWrite(s.traceback, "dim"); }
+        }
+
+        termWrite("");
+        termWrite("Collect: " + (s.frames || 0) + " frames, " + (s.bytes || 0) + " / 32768 bytes");
+
+        if (s.message) {
+          termWrite("");
+          termWrite(s.message, s.status === "dumped" ? "ok" : "warn");
+        }
+        termWrite("");
+        termWrite("Screenshot ALL of this — scroll up for the full log — and send it to Calvin.", "dim");
+      }
+
+      async function runDiag() {
+        let s = null;
+        try { s = await getStatus(); } catch (err) { /* fall through to start */ }
+
+        if (s && s.status === "running") {
+          termWrite("A diagnostic run is already in progress — attaching...");
+        } else {
+          termWrite("Starting DataFlash diagnostics.");
+          termWrite("The car will freak out — don't worry.", "warn");
+          try {
+            const r = await fetch("/api/dataflash-diag", { method: "POST", cache: "no-store" });
+            const started = await r.json();
+            if (!started.ok && started.status !== "running") {
+              termWrite(started.message || "Could not start diagnostics.", "err");
+              return;
+            }
+          } catch (err) {
+            termWrite(String(err), "err");
+            return;
+          }
+        }
+
+        termWrite("Running the dump flow step by step...");
+        let lastStep = -1;
+        while (true) {
+          await sleep(500);
+          try { s = await getStatus(); } catch (err) { continue; }
+          if (s.status === "running") {
+            if ((s.step_count || 0) !== lastStep) {
+              lastStep = s.step_count || 0;
+              termWrite("  step " + lastStep + (s.last ? "  " + s.last : ""));
+            }
+            continue;
+          }
+          renderDiag(s);
+          break;
+        }
+      }
+
+      runDiag();
+    </script>
+  </body>
+</html>

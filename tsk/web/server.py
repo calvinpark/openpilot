@@ -20,6 +20,7 @@ from tsk.lib.key_file_manager import KeyFileManager, format_key
 from tsk.lib.matcher import run as run_matcher
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
 from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
+from tsk.lib.dump_diag import diagnose as dump_diagnose
 
 
 HOST = "0.0.0.0"
@@ -265,6 +266,24 @@ sniff_state = {
   "total": 0,
   "buses": [],
   "markers": [],
+  "message": "",
+}
+
+# Instrumented DataFlash dump (diagnostics). Runs the dump flow step by step and holds
+# the full per-step log, EPS identity, and any traceback, for triaging an unknown EPS.
+diag_lock = threading.Lock()
+diag_state = {
+  "status": "idle",   # idle | running | dumped | no_frames | rejected | failed
+  "step_count": 0,
+  "last": "",
+  "panda": "",
+  "identity": [],
+  "steps": [],
+  "failed_at": "",
+  "exception": "",
+  "traceback": "",
+  "frames": 0,
+  "bytes": 0,
   "message": "",
 }
 
@@ -547,6 +566,93 @@ def start_sniff_job() -> bool:
   return True
 
 
+def _diag_progress(steps=None, last=None) -> None:
+  with diag_lock:
+    if steps is not None:
+      diag_state["step_count"] = steps
+    if last is not None:
+      diag_state["last"] = last
+
+
+def _run_diag_mock() -> None:
+  # Laptop dry run: a realistic out-of-family result — identity reads return, the
+  # session flow passes, and the EPS rejects the Willem key at security access.
+  for i, name in enumerate(("connect panda", "session EXTENDED", "identity", "security SEND_KEY"), 1):
+    time.sleep(0.3)
+    _diag_progress(steps=i, last=name)
+  with diag_lock:
+    diag_state.update(
+      status="rejected",
+      step_count=7,
+      last="security SEND_KEY",
+      panda="1.7.0-mock",
+      identity=[
+        {"did": "0xf181", "name": "app_sw_id", "hex": "018965b0000000", "ascii": ".8965B......"},
+        {"did": "0xf187", "name": "spare_part_no", "hex": "3839363542", "ascii": "8965B"},
+        {"did": "0xf18c", "name": "ecu_serial", "hex": "", "ascii": "NRC 0x31 request out of range"},
+      ],
+      steps=[
+        {"name": "connect panda", "ok": True, "detail": "fw 1.7.0-mock", "ms": 42},
+        {"name": "session DEFAULT", "ok": True, "detail": "ok", "ms": 12},
+        {"name": "session EXTENDED", "ok": True, "detail": "ok", "ms": 9},
+        {"name": "session PROGRAMMING", "ok": True, "detail": "ok", "ms": 11},
+        {"name": "session PROGRAMMING (repeat)", "ok": True, "detail": "ok", "ms": 8},
+        {"name": "security REQUEST_SEED", "ok": True, "detail": "0011223344556677", "ms": 15},
+        {"name": "security SEND_KEY", "ok": False, "detail": "NRC 0x35 invalid key", "ms": 14},
+      ],
+      failed_at="security SEND_KEY",
+      exception="NegativeResponseError: securityAccess - invalid key",
+      traceback="(mock traceback)",
+      frames=0, bytes=0,
+      message="EPS rejected the Willem key at security access — not in the exploit family (mock).",
+    )
+
+
+def _run_diag_job() -> None:
+  try:
+    result = dump_diagnose(progress_cb=_diag_progress)
+    with diag_lock:
+      diag_state.update(
+        status=result.get("status", "failed"),
+        panda=result.get("panda", ""),
+        identity=result.get("identity", []),
+        steps=result.get("steps", []),
+        step_count=len(result.get("steps", [])),
+        failed_at=result.get("failed_at", ""),
+        exception=result.get("exception", ""),
+        traceback=result.get("traceback", ""),
+        frames=result.get("frames", 0),
+        bytes=result.get("bytes", 0),
+        message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_diag_mock()
+  except Exception as e:
+    with diag_lock:
+      diag_state.update(status="failed", message=str(e), traceback=traceback.format_exc())
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_diag_job() -> bool:
+  # panda_lock gates it against extract/dump/collect/sniff, released in the finally.
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with diag_lock:
+    diag_state.update(status="running", step_count=0, last="", panda="", identity=[],
+                      steps=[], failed_at="", exception="", traceback="", frames=0,
+                      bytes=0, message="")
+  try:
+    threading.Thread(target=_run_diag_job, name="tsk_dataflash_diag", daemon=True).start()
+  except Exception:
+    with diag_lock:
+      diag_state.update(status="failed", message="Could not start the diagnostic job.")
+    panda_lock.release()
+    return False
+  return True
+
+
 class TSKWebHandler(BaseHTTPRequestHandler):
   server_version = "TSKWeb/0.1"
 
@@ -758,6 +864,17 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/dataflash-diag":
+      if not start_diag_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
     if path == "/api/clear-cache":
       with can_lock:
         can_running = can_state["status"] == "running"
@@ -813,6 +930,12 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/can-sniff-status":
       with sniff_lock:
         payload = dict(sniff_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/dataflash-diag-status":
+      with diag_lock:
+        payload = dict(diag_state)
       self._send_json(payload, send_body=send_body)
       return
 
