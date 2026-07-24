@@ -111,10 +111,15 @@
             termWrite(`${label} 0 frames`, "dim");
           } else {
             let line = `${label} ${b.total} frames (${b.unique} IDs)`;
+            if (b.max_len > 8) line += ` [CAN-FD ${b.max_len}B]`;
             if (b.ids && b.ids.length) line += " — " + b.ids.join(" ");
             if (b.truncated) line += " …";
-            termWrite(line);
+            termWrite(line, b.max_len > 8 ? "warn" : undefined);
           }
+        }
+        if ((s.fd_buses || []).length) {
+          termWrite("");
+          termWrite("CAN-FD seen on bus " + s.fd_buses.join(", ") + " (frames > 8 bytes)", "warn");
         }
         termWrite("");
         termWrite("SecOC markers (any bus):");

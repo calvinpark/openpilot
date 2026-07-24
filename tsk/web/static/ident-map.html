@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Programming Session Probe</title>
+    <title>EPS Identity & Service Map</title>
     <style>
       * { box-sizing: border-box; margin: 0; }
 
@@ -38,7 +38,7 @@
 
       .page-header { padding: 0 20px 12px; }
 
-      .page-title { font-size: 26px; font-weight: 700; }
+      .page-title { font-size: 24px; font-weight: 700; }
 
       .terminal {
         margin: 0 16px 16px;
@@ -68,7 +68,7 @@
         <a class="back-link" href="/">TSK Manager</a>
       </div>
       <header class="page-header">
-        <div class="page-title">Programming Session Probe</div>
+        <div class="page-title">EPS Identity &amp; Service Map</div>
       </header>
       <div class="terminal" id="terminal"></div>
     </main>
@@ -86,93 +86,71 @@
 
       function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+      function pad(s, n) {
+        s = String(s);
+        return s.length >= n ? s : s + " ".repeat(n - s.length);
+      }
+
       async function getStatus() {
-        const r = await fetch("/api/prog-probe-status", { cache: "no-store" });
+        const r = await fetch("/api/ident-map-status", { cache: "no-store" });
         return r.json();
       }
 
-      function renderProbe(s) {
-        termWrite("");
-        termWrite("Programming Session Probe", "ok");
-        termWrite("Panda: " + (s.panda || "?"));
+      function epsBusLine(s) {
         if (s.eps_bus === undefined || s.eps_bus === -1) {
           termWrite("EPS bus: no response on 0/1/2", "err");
         } else {
           termWrite("EPS bus: " + s.eps_bus, s.eps_bus === 0 ? "" : "warn");
         }
+      }
+
+      function renderMap(s) {
+        termWrite("");
+        termWrite("EPS identity & service map", "ok");
+        termWrite("Panda: " + (s.panda || "?"));
+        epsBusLine(s);
 
         termWrite("");
-        termWrite("Entry sequences:");
-        for (const a of (s.attempts || [])) {
-          const mark = a.ok ? "✓ " : "✗ ";
-          termWrite("  " + mark + a.name, a.ok ? "ok" : "err");
-          termWrite("      " + a.detail, a.ok ? "ok" : "dim");
-        }
-
-        const levels = s.security_levels || [];
-        if (levels.length) {
-          termWrite("");
-          termWrite("Security seed by level (extended):");
-          for (const lv of levels) {
-            const got = String(lv.detail).indexOf("seed ") === 0;
-            termWrite("  " + lv.level + " : " + lv.detail, got ? "ok" : "dim");
+        termWrite("Identity:");
+        if (!(s.identity || []).length) termWrite("  (none read)", "dim");
+        for (const it of (s.identity || [])) {
+          const label = pad(it.did + " " + it.name, 24);
+          if (it.hex) {
+            termWrite("  " + label + ": " + it.ascii + "  [" + it.hex + "]");
+          } else {
+            termWrite("  " + label + ": " + it.ascii, "warn");
           }
         }
 
-        const dit = s.did_it_take || {};
-        if (dit.after !== undefined) {
-          termWrite("");
-          termWrite("Did programming take? (0xF186)");
-          termWrite("  before : " + (dit.before || "-"));
-          let ditCls = "warn";
-          if (dit.switched === true) ditCls = "ok";
-          else if (dit.switched === false) ditCls = "err";
-          termWrite("  after  : " + (dit.after || "-"), ditCls);
-          if (dit.switched === true) termWrite("  -> switched to programming silently", "ok");
-          else if (dit.switched === false) termWrite("  -> session did not change (refused)", "err");
-          else termWrite("  -> session unreadable (inconclusive)", "warn");
-        }
-
-        const allbus = s.all_bus || [];
-        if (allbus.length) {
-          termWrite("");
-          termWrite("All-bus listen after PROGRAMMING:");
-          for (const b of allbus) {
-            let line = "  bus " + b.bus + ": " + b.unique + " IDs";
-            if (b.saw_eps_response) line += "  <- EPS response seen here";
-            termWrite(line, b.saw_eps_response ? "ok" : "dim");
-          }
-        }
-
-        const sec = s.security || {};
-        if (sec.seed || sec.send_key) {
-          termWrite("");
-          termWrite("Security access:");
-          termWrite("  seed     : " + (sec.seed || "-"));
-          termWrite("  send_key : " + (sec.send_key || "-"), sec.send_key === "accepted" ? "ok" : "warn");
-          if (sec.programming) termWrite("  programming after key : " + sec.programming);
+        termWrite("");
+        termWrite("Services:");
+        for (const sv of (s.services || [])) {
+          let cls = "warn";
+          if (sv.supported === true) cls = "ok";
+          else if (sv.supported === false) cls = "err";
+          termWrite("  " + pad(sv.name, 22) + " " + sv.detail, cls);
         }
 
         termWrite("");
-        if (s.message) termWrite(s.message, s.status === "entered" ? "ok" : "warn");
+        if (s.message) termWrite(s.message, "warn");
         termWrite("");
         termWrite("Screenshot ALL of this — scroll up for the full list — and send it to Calvin.", "dim");
       }
 
-      async function runProbe() {
+      async function runMap() {
         let s = null;
         try { s = await getStatus(); } catch (err) { /* fall through */ }
 
         if (s && s.status === "running") {
-          termWrite("A probe is already in progress — attaching...");
+          termWrite("A map is already in progress — attaching...");
         } else {
-          termWrite("Starting programming-session probe.");
-          termWrite("The car will freak out — don't worry. This tries a few ways in; nothing is dumped.", "warn");
+          termWrite("Reading EPS identity and probing which UDS services answer.", "warn");
+          termWrite("Read-only: no reset, no write, no key sent.", "dim");
           try {
-            const r = await fetch("/api/prog-probe", { method: "POST", cache: "no-store" });
+            const r = await fetch("/api/ident-map", { method: "POST", cache: "no-store" });
             const started = await r.json();
             if (!started.ok && started.status !== "running") {
-              termWrite(started.message || "Could not start the probe.", "err");
+              termWrite(started.message || "Could not start the map.", "err");
               return;
             }
           } catch (err) {
@@ -181,24 +159,29 @@
           }
         }
 
-        termWrite("Trying entry sequences (this takes ~30s)...");
+        termWrite("Mapping...");
         let last = -1;
         while (true) {
           await sleep(500);
           try { s = await getStatus(); } catch (err) { continue; }
           if (s.status === "running") {
-            if ((s.attempt_count || 0) !== last) {
-              last = s.attempt_count || 0;
-              termWrite("  sequence " + last + (s.last ? "  " + s.last : ""));
+            if ((s.count || 0) !== last) {
+              last = s.count || 0;
+              termWrite("  " + last + (s.last ? "  " + s.last : ""));
             }
             continue;
           }
-          renderProbe(s);
+          if (s.status === "failed") {
+            termWrite("");
+            termWrite(s.message || "Map failed.", "err");
+            break;
+          }
+          renderMap(s);
           break;
         }
       }
 
-      runProbe();
+      runMap();
     </script>
   </body>
 </html>

@@ -145,6 +145,10 @@
         overflow: hidden;
       }
 
+      /* span diagnostic build: hide the production TSKM surfaces without removing
+         them, so the polling JS and reboot handlers keep working against live nodes. */
+      .span-hidden { display: none !important; }
+
       .group-item {
         display: block;
         width: 100%;
@@ -318,13 +322,13 @@
         <div class="status-key" id="keyDetail"></div>
       </div>
 
-      <div class="section-label">2021, 2022, 2023 RAV4 Prime &amp; Sienna</div>
-      <div class="group">
+      <div class="section-label span-hidden">2021, 2022, 2023 RAV4 Prime &amp; Sienna</div>
+      <div class="group span-hidden">
         <a class="group-item action" href="/extractor.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">TSK Extractor <span class="chevron">›</span></a>
       </div>
 
-      <div class="section-label">2021+</div>
-      <div class="group">
+      <div class="section-label span-hidden">2021+</div>
+      <div class="group span-hidden">
         <a class="prereq-row" href="/can-collector.html" id="canRow">
           <div class="prereq-dot" id="canDot"></div>
           <div class="prereq-body">
@@ -343,27 +347,34 @@
         </a>
       </div>
 
-      <div class="group" style="margin-top: 8px;">
+      <div class="group span-hidden" style="margin-top: 8px;">
         <button class="group-item disabled" type="button" id="matcherBtn" disabled>Find Toyota Security Key (need CAN &amp; DataFlash)</button>
       </div>
 
-      <div class="section-label">Diagnostics</div>
+      <div class="section-label">Not Ready To Drive</div>
       <div class="group">
-        <a class="group-item action" href="/can-sniff.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Sniff CAN messages <span class="chevron">›</span></a>
+        <a class="group-item action" href="/read-mem.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Read key region (0x23) <span class="chevron">›</span></a>
+        <a class="group-item action" href="/ident-map.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">EPS identity &amp; service map <span class="chevron">›</span></a>
+        <a class="group-item action" href="/prog-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Programming &amp; security probe <span class="chevron">›</span></a>
         <a class="group-item action" href="/dataflash-diag.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">DataFlash dump (diagnostic) <span class="chevron">›</span></a>
-        <a class="group-item action" href="/prog-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Programming session probe <span class="chevron">›</span></a>
+        <a class="group-item action" href="/reset-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Reset-window probe <span class="chevron">›</span></a>
       </div>
 
-      <div class="section-label">Manage</div>
+      <div class="section-label">READY</div>
       <div class="group">
+        <a class="group-item action" href="/can-sniff.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Sniff CAN messages <span class="chevron">›</span></a>
+      </div>
+
+      <div class="section-label span-hidden">Manage</div>
+      <div class="group span-hidden">
         <button class="group-item disabled" type="button" id="cleanerBtn" disabled>Clear extraction cache</button>
         <button class="group-item disabled" type="button" id="uninstallBtn" disabled>Uninstall key</button>
       </div>
 
       <div class="section-label">Reboot</div>
       <div class="group">
-        <button class="group-item" type="button" id="recommendedBtn">Install recommended</button>
-        <button class="group-item" type="button" id="alternateBtn">Install alternate</button>
+        <button class="group-item span-hidden" type="button" id="recommendedBtn">Install recommended</button>
+        <button class="group-item span-hidden" type="button" id="alternateBtn">Install alternate</button>
         <button class="group-item" type="button" id="differentBtn">Install a different fork/branch</button>
         <button class="group-item" type="button" id="retryBtn">Reboot to try again</button>
       </div>
@@ -744,20 +755,17 @@
       }
 
       function buildMatchDebug(result) {
-        // Complete-dump not-found: show what the scan saw so a report has numbers.
-        // Oracle totals ride in the sync/protected "matched/total" strings; the
-        // captured dump size comes from the status the page already polls.
-        const lines = ["No key found in the DataFlash dump.", ""];
-        if (result.address) {
-          lines.push(`Best candidate: ${result.address}`);
-          lines.push(`Matches: ${result.matches} (sync ${result.sync}, protected ${result.protected})`);
-        } else {
-          lines.push("No candidate window matched the CAN oracle.");
-        }
-        if (result.windows_scanned) lines.push(`Windows scanned: ${result.windows_scanned}`);
-        lines.push(`Dump captured: ${state.dfBytes} / ${state.dfTotal} bytes`);
-        lines.push("");
-        lines.push("Take a screenshot, post on #toyota-security, and ping @calvinspark.");
+        // Complete-dump not-found: the plain result plus the captured byte count, so a
+        // screenshot still carries the dump size. Scan internals (candidate address,
+        // match counts, windows scanned) are omitted as user-facing jargon — the API
+        // response still carries them for debugging.
+        const lines = [
+          "Key not found in the DataFlash dump.",
+          "",
+          `Dump captured: ${state.dfBytes} / ${state.dfTotal} bytes`,
+          "",
+          "Take a screenshot, post on #toyota-security, and ping @calvinspark.",
+        ];
         return lines.join("\n");
       }
 

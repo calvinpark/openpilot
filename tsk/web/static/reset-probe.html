@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Programming Session Probe</title>
+    <title>Reset-Window Probe</title>
     <style>
       * { box-sizing: border-box; margin: 0; }
 
@@ -68,7 +68,7 @@
         <a class="back-link" href="/">TSK Manager</a>
       </div>
       <header class="page-header">
-        <div class="page-title">Programming Session Probe</div>
+        <div class="page-title">Reset-Window Probe</div>
       </header>
       <div class="terminal" id="terminal"></div>
     </main>
@@ -87,92 +87,56 @@
       function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
       async function getStatus() {
-        const r = await fetch("/api/prog-probe-status", { cache: "no-store" });
+        const r = await fetch("/api/reset-probe-status", { cache: "no-store" });
         return r.json();
       }
 
-      function renderProbe(s) {
-        termWrite("");
-        termWrite("Programming Session Probe", "ok");
-        termWrite("Panda: " + (s.panda || "?"));
+      function epsBusLine(s) {
         if (s.eps_bus === undefined || s.eps_bus === -1) {
           termWrite("EPS bus: no response on 0/1/2", "err");
         } else {
           termWrite("EPS bus: " + s.eps_bus, s.eps_bus === 0 ? "" : "warn");
         }
+      }
+
+      function renderReset(s) {
+        termWrite("");
+        termWrite("Reset-window probe", "ok");
+        termWrite("Panda: " + (s.panda || "?"));
+        epsBusLine(s);
+        termWrite("Reset: " + (s.reset || "?"));
 
         termWrite("");
-        termWrite("Entry sequences:");
+        termWrite("PROGRAMMING attempts through the reboot:");
         for (const a of (s.attempts || [])) {
-          const mark = a.ok ? "✓ " : "✗ ";
-          termWrite("  " + mark + a.name, a.ok ? "ok" : "err");
-          termWrite("      " + a.detail, a.ok ? "ok" : "dim");
+          const accepted = String(a.detail).indexOf("accepted") !== -1;
+          termWrite("  " + a.t_ms + "ms  " + a.detail, accepted ? "ok" : "dim");
         }
 
-        const levels = s.security_levels || [];
-        if (levels.length) {
-          termWrite("");
-          termWrite("Security seed by level (extended):");
-          for (const lv of levels) {
-            const got = String(lv.detail).indexOf("seed ") === 0;
-            termWrite("  " + lv.level + " : " + lv.detail, got ? "ok" : "dim");
-          }
-        }
-
-        const dit = s.did_it_take || {};
-        if (dit.after !== undefined) {
-          termWrite("");
-          termWrite("Did programming take? (0xF186)");
-          termWrite("  before : " + (dit.before || "-"));
-          let ditCls = "warn";
-          if (dit.switched === true) ditCls = "ok";
-          else if (dit.switched === false) ditCls = "err";
-          termWrite("  after  : " + (dit.after || "-"), ditCls);
-          if (dit.switched === true) termWrite("  -> switched to programming silently", "ok");
-          else if (dit.switched === false) termWrite("  -> session did not change (refused)", "err");
-          else termWrite("  -> session unreadable (inconclusive)", "warn");
-        }
-
-        const allbus = s.all_bus || [];
-        if (allbus.length) {
-          termWrite("");
-          termWrite("All-bus listen after PROGRAMMING:");
-          for (const b of allbus) {
-            let line = "  bus " + b.bus + ": " + b.unique + " IDs";
-            if (b.saw_eps_response) line += "  <- EPS response seen here";
-            termWrite(line, b.saw_eps_response ? "ok" : "dim");
-          }
-        }
-
-        const sec = s.security || {};
-        if (sec.seed || sec.send_key) {
-          termWrite("");
-          termWrite("Security access:");
-          termWrite("  seed     : " + (sec.seed || "-"));
-          termWrite("  send_key : " + (sec.send_key || "-"), sec.send_key === "accepted" ? "ok" : "warn");
-          if (sec.programming) termWrite("  programming after key : " + sec.programming);
-        }
+        termWrite("");
+        termWrite("Active session after reset: " + (s.session_after || "?"),
+                  s.session_after === "0x02" ? "ok" : "warn");
 
         termWrite("");
         if (s.message) termWrite(s.message, s.status === "entered" ? "ok" : "warn");
         termWrite("");
-        termWrite("Screenshot ALL of this — scroll up for the full list — and send it to Calvin.", "dim");
+        termWrite("Screenshot ALL of this and send it to Calvin.", "dim");
       }
 
-      async function runProbe() {
+      async function runReset() {
         let s = null;
         try { s = await getStatus(); } catch (err) { /* fall through */ }
 
         if (s && s.status === "running") {
-          termWrite("A probe is already in progress — attaching...");
+          termWrite("A reset probe is already in progress — attaching...");
         } else {
-          termWrite("Starting programming-session probe.");
-          termWrite("The car will freak out — don't worry. This tries a few ways in; nothing is dumped.", "warn");
+          termWrite("Resetting the EPS and trying PROGRAMMING through the reboot.", "warn");
+          termWrite("The steering module reboots (safe while parked). Nothing is written.", "dim");
           try {
-            const r = await fetch("/api/prog-probe", { method: "POST", cache: "no-store" });
+            const r = await fetch("/api/reset-probe", { method: "POST", cache: "no-store" });
             const started = await r.json();
             if (!started.ok && started.status !== "running") {
-              termWrite(started.message || "Could not start the probe.", "err");
+              termWrite(started.message || "Could not start the reset probe.", "err");
               return;
             }
           } catch (err) {
@@ -181,24 +145,29 @@
           }
         }
 
-        termWrite("Trying entry sequences (this takes ~30s)...");
+        termWrite("Running (~6s)...");
         let last = -1;
         while (true) {
           await sleep(500);
           try { s = await getStatus(); } catch (err) { continue; }
           if (s.status === "running") {
-            if ((s.attempt_count || 0) !== last) {
-              last = s.attempt_count || 0;
-              termWrite("  sequence " + last + (s.last ? "  " + s.last : ""));
+            if ((s.count || 0) !== last) {
+              last = s.count || 0;
+              termWrite("  attempt " + last + (s.last ? "  " + s.last : ""));
             }
             continue;
           }
-          renderProbe(s);
+          if (s.status === "failed") {
+            termWrite("");
+            termWrite(s.message || "Reset probe failed.", "err");
+            break;
+          }
+          renderReset(s);
           break;
         }
       }
 
-      runProbe();
+      runReset();
     </script>
   </body>
 </html>

@@ -22,6 +22,9 @@ from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
 from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 from tsk.lib.dump_diag import diagnose as dump_diagnose
 from tsk.lib.prog_probe import probe_programming
+from tsk.lib.read_mem import read_key_region
+from tsk.lib.ident_map import map_surface
+from tsk.lib.reset_probe import probe_reset_window
 
 
 HOST = "0.0.0.0"
@@ -267,6 +270,7 @@ sniff_state = {
   "total": 0,
   "buses": [],
   "markers": [],
+  "fd_buses": [],
   "message": "",
 }
 
@@ -300,6 +304,48 @@ probe_state = {
   "eps_bus": -1,
   "attempts": [],
   "security": {},
+  "security_levels": [],
+  "did_it_take": {},
+  "all_bus": [],
+  "message": "",
+}
+
+# ReadMemoryByAddress (0x23) probe — direct read of the key region, no programming.
+readmem_lock = threading.Lock()
+readmem_state = {
+  "status": "idle",   # idle | running | read | denied | unreachable | failed
+  "count": 0,
+  "last": "",
+  "panda": "",
+  "eps_bus": -1,
+  "reads": [],
+  "message": "",
+}
+
+# EPS identity + read-only service-surface map.
+ident_lock = threading.Lock()
+ident_state = {
+  "status": "idle",   # idle | running | mapped | unreachable | failed
+  "count": 0,
+  "last": "",
+  "panda": "",
+  "eps_bus": -1,
+  "identity": [],
+  "services": [],
+  "message": "",
+}
+
+# Reset-window probe — hard reset, then hammer PROGRAMMING through the reboot.
+reset_lock = threading.Lock()
+reset_state = {
+  "status": "idle",   # idle | running | entered | blocked | unreachable | failed
+  "count": 0,
+  "last": "",
+  "panda": "",
+  "eps_bus": -1,
+  "reset": "",
+  "attempts": [],
+  "session_after": "",
   "message": "",
 }
 
@@ -532,11 +578,12 @@ def _run_sniff_mock() -> None:
     0: Counter({0x0f: 30, 0x2e4: 50, 0x131: 40, 0x344: 20, 0x25: 120, 0xaa: 120}),
     1: Counter({0x3bc: 12, 0x1c4: 12}),
   }
-  result = summarize_counts(demo, 8.0)
+  demo_maxlen = {0: 8, 1: 64}   # bus 1 carrying CAN-FD frames, to exercise the FD display
+  result = summarize_counts(demo, 8.0, demo_maxlen)
   with sniff_lock:
     sniff_state.update(status="complete", seconds=result["seconds"], frames=result["total"],
                        total=result["total"], buses=result["buses"], markers=result["markers"],
-                       message=result["message"] + " (mock)")
+                       fd_buses=result["fd_buses"], message=result["message"] + " (mock)")
 
 
 def _run_sniff_job() -> None:
@@ -550,6 +597,7 @@ def _run_sniff_job() -> None:
         total=result.get("total", 0),
         buses=result.get("buses", []),
         markers=result.get("markers", []),
+        fd_buses=result.get("fd_buses", []),
         message=result.get("message", ""),
       )
   except NotAGNOSError:
@@ -692,20 +740,35 @@ def _run_probe_mock() -> None:
   with probe_lock:
     probe_state.update(
       status="blocked",
-      attempt_count=5,
-      last=names[-1],
+      attempt_count=8,
+      last="all-bus-listen",
       panda="1.7.0-mock",
       eps_bus=1,
       attempts=[
-        {"name": names[0], "ok": False, "detail": timeout},
-        {"name": names[1], "ok": False, "detail": timeout},
-        {"name": names[2], "ok": False, "detail": timeout},
-        {"name": names[3], "ok": False, "detail": timeout},
-        {"name": names[4], "ok": False, "detail": "send_key NRC 0x35 invalid key"},
+        {"name": names[0], "ok": False, "detail": timeout, "programming": True},
+        {"name": names[1], "ok": False, "detail": timeout, "programming": True},
+        {"name": names[2], "ok": False, "detail": timeout, "programming": True},
+        {"name": names[3], "ok": False, "detail": timeout, "programming": True},
+        {"name": "safety-system session (0x04)", "ok": False, "detail": timeout, "programming": False},
+        {"name": names[4], "ok": False, "detail": "send_key NRC 0x35 invalid key", "programming": True},
       ],
       security={"seed": "0011223344556677", "send_key": "NRC 0x35 invalid key", "programming": ""},
-      message="No sequence entered the programming session on bus 1. The entry sequence "
-              "for this EPS is unknown — the firmware-dump path is next. (mock)",
+      security_levels=[
+        {"level": "0x01", "detail": "NRC 0x7e subFunctionNotSupportedInActiveSession"},
+        {"level": "0x03", "detail": "NRC 0x7e subFunctionNotSupportedInActiveSession"},
+        {"level": "0x05", "detail": "NRC 0x31 requestOutOfRange"},
+        {"level": "0x07", "detail": "NRC 0x31 requestOutOfRange"},
+        {"level": "0x09", "detail": "NRC 0x31 requestOutOfRange"},
+        {"level": "0x0b", "detail": "NRC 0x31 requestOutOfRange"},
+      ],
+      did_it_take={"before": "0x03", "after": "NRC 0x31 requestOutOfRange", "switched": None},
+      all_bus=[
+        {"bus": 0, "unique": 22, "saw_eps_response": False, "ids": ["0x25", "0xaa", "0xb4"]},
+        {"bus": 1, "unique": 3, "saw_eps_response": False, "ids": ["0x1c4", "0x3bc"]},
+        {"bus": 2, "unique": 22, "saw_eps_response": False, "ids": ["0x25", "0xaa", "0xb4"]},
+      ],
+      message="No sequence entered on bus 1; the session DID was unreadable so did-it-take is "
+              "inconclusive. Use all-bus-listen (a reroute) as the deciding signal. (mock)",
     )
 
 
@@ -720,6 +783,9 @@ def _run_probe_job() -> None:
         attempts=result.get("attempts", []),
         attempt_count=len(result.get("attempts", [])),
         security=result.get("security", {}),
+        security_levels=result.get("security_levels", []),
+        did_it_take=result.get("did_it_take", {}),
+        all_bus=result.get("all_bus", []),
         message=result.get("message", ""),
       )
   except NotAGNOSError:
@@ -744,6 +810,206 @@ def start_probe_job() -> bool:
   except Exception:
     with probe_lock:
       probe_state.update(status="failed", message="Could not start the probe job.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def _readmem_progress(reads=None, last=None) -> None:
+  with readmem_lock:
+    if reads is not None:
+      readmem_state["count"] = reads
+    if last is not None:
+      readmem_state["last"] = last
+
+
+def _run_readmem_mock() -> None:
+  # Laptop dry run: the expected Corolla shape — 0x23 refused at every address.
+  for i, name in enumerate(("key region (extended)", "dataflash base (extended)",
+                            "ram (control) (extended)", "key region (default)"), 1):
+    time.sleep(0.3)
+    _readmem_progress(reads=i, last=name)
+  with readmem_lock:
+    readmem_state.update(
+      status="denied", count=4, last="key region (default)", panda="1.7.0-mock", eps_bus=1,
+      reads=[
+        {"name": "key region", "session": "extended", "address": "0xff206e14", "size": 16,
+         "ok": False, "detail": "NRC 0x33 securityAccessDenied"},
+        {"name": "dataflash base", "session": "extended", "address": "0xff200000", "size": 16,
+         "ok": False, "detail": "NRC 0x33 securityAccessDenied"},
+        {"name": "ram (control)", "session": "extended", "address": "0xfebf0000", "size": 16,
+         "ok": False, "detail": "NRC 0x31 requestOutOfRange"},
+        {"name": "key region", "session": "default", "address": "0xff206e14", "size": 16,
+         "ok": False, "detail": "NRC 0x7f serviceNotSupportedInActiveSession"},
+      ],
+      message="0x23 was refused at every address — direct memory reads are not allowed here. (mock)",
+    )
+
+
+def _run_readmem_job() -> None:
+  try:
+    result = read_key_region(progress_cb=_readmem_progress)
+    with readmem_lock:
+      readmem_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), reads=result.get("reads", []),
+        count=len(result.get("reads", [])), message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_readmem_mock()
+  except Exception as e:
+    with readmem_lock:
+      readmem_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_readmem_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with readmem_lock:
+    readmem_state.update(status="running", count=0, last="", panda="", eps_bus=-1, reads=[], message="")
+  try:
+    threading.Thread(target=_run_readmem_job, name="tsk_read_mem", daemon=True).start()
+  except Exception:
+    with readmem_lock:
+      readmem_state.update(status="failed", message="Could not start the read-memory job.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def _ident_progress(items=None, last=None) -> None:
+  with ident_lock:
+    if items is not None:
+      ident_state["count"] = items
+    if last is not None:
+      ident_state["last"] = last
+
+
+def _run_ident_mock() -> None:
+  for i in range(1, 6):
+    time.sleep(0.25)
+    _ident_progress(items=i * 4, last=f"item {i * 4}")
+  with ident_lock:
+    ident_state.update(
+      status="mapped", count=24, last="0x19 read DTC info", panda="1.7.0-mock", eps_bus=1,
+      identity=[
+        {"did": "0xf181", "name": "app_sw_id", "hex": "383936354631323038303030", "ascii": "8965F1208000"},
+        {"did": "0xf186", "name": "active_session", "hex": "03", "ascii": "."},
+        {"did": "0xf187", "name": "spare_part_no", "hex": "", "ascii": "NRC 0x31 requestOutOfRange"},
+        {"did": "0xf18c", "name": "ecu_serial", "hex": "38393635303132", "ascii": "8965012"},
+        {"did": "0xf190", "name": "vin", "hex": "", "ascii": "NRC 0x31 requestOutOfRange"},
+      ],
+      services=[
+        {"name": "0x10 session control", "supported": True, "detail": "supported"},
+        {"name": "0x22 read data by id", "supported": True, "detail": "supported"},
+        {"name": "0x23 read memory", "supported": True, "detail": "supported (NRC 0x33 securityAccessDenied)"},
+        {"name": "0x27 security access", "supported": True, "detail": "supported (NRC 0x7e subFunctionNotSupportedInActiveSession)"},
+        {"name": "0x3e tester present", "supported": True, "detail": "supported"},
+        {"name": "0x19 read DTC info", "supported": True, "detail": "supported"},
+      ],
+      message="Read 3 identity field(s); 6 of 6 probed services answered. (mock)",
+    )
+
+
+def _run_ident_job() -> None:
+  try:
+    result = map_surface(progress_cb=_ident_progress)
+    with ident_lock:
+      ident_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), identity=result.get("identity", []),
+        services=result.get("services", []),
+        count=len(result.get("identity", [])) + len(result.get("services", [])),
+        message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_ident_mock()
+  except Exception as e:
+    with ident_lock:
+      ident_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_ident_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with ident_lock:
+    ident_state.update(status="running", count=0, last="", panda="", eps_bus=-1,
+                       identity=[], services=[], message="")
+  try:
+    threading.Thread(target=_run_ident_job, name="tsk_ident_map", daemon=True).start()
+  except Exception:
+    with ident_lock:
+      ident_state.update(status="failed", message="Could not start the identity-map job.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def _reset_progress(attempts=None, last=None) -> None:
+  with reset_lock:
+    if attempts is not None:
+      reset_state["count"] = attempts
+    if last is not None:
+      reset_state["last"] = last
+
+
+def _run_reset_mock() -> None:
+  for i in range(1, 5):
+    time.sleep(0.3)
+    _reset_progress(attempts=i, last=f"{i * 900}ms timeout")
+  with reset_lock:
+    reset_state.update(
+      status="blocked", count=4, last="2700ms timeout", panda="1.7.0-mock", eps_bus=1,
+      reset="hard reset accepted",
+      attempts=[
+        {"t_ms": 5, "detail": "timeout"},
+        {"t_ms": 900, "detail": "timeout"},
+        {"t_ms": 1800, "detail": "timeout"},
+        {"t_ms": 2700, "detail": "timeout"},
+      ],
+      session_after="NRC 0x31 requestOutOfRange",
+      message="No PROGRAMMING acceptance in the reset window. Active session after reset: "
+              "NRC 0x31 requestOutOfRange (0x02 would mean it switched silently). (mock)",
+    )
+
+
+def _run_reset_job() -> None:
+  try:
+    result = probe_reset_window(progress_cb=_reset_progress)
+    with reset_lock:
+      reset_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), reset=result.get("reset", ""),
+        attempts=result.get("attempts", []), count=len(result.get("attempts", [])),
+        session_after=result.get("session_after", ""), message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_reset_mock()
+  except Exception as e:
+    with reset_lock:
+      reset_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_reset_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with reset_lock:
+    reset_state.update(status="running", count=0, last="", panda="", eps_bus=-1,
+                       reset="", attempts=[], session_after="", message="")
+  try:
+    threading.Thread(target=_run_reset_job, name="tsk_reset_probe", daemon=True).start()
+  except Exception:
+    with reset_lock:
+      reset_state.update(status="failed", message="Could not start the reset-probe job.")
     panda_lock.release()
     return False
   return True
@@ -982,6 +1248,39 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/read-mem":
+      if not start_readmem_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
+    if path == "/api/ident-map":
+      if not start_ident_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
+    if path == "/api/reset-probe":
+      if not start_reset_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
     if path == "/api/clear-cache":
       with can_lock:
         can_running = can_state["status"] == "running"
@@ -1049,6 +1348,24 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/prog-probe-status":
       with probe_lock:
         payload = dict(probe_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/read-mem-status":
+      with readmem_lock:
+        payload = dict(readmem_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/ident-map-status":
+      with ident_lock:
+        payload = dict(ident_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/reset-probe-status":
+      with reset_lock:
+        payload = dict(reset_state)
       self._send_json(payload, send_body=send_body)
       return
 

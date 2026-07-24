@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Read Key Region (0x23)</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .page {
+        width: min(100vw, 460px);
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 100vh;
+      }
+
+      .back-bar { padding: 12px 20px; }
+
+      .back-link {
+        color: #007aff;
+        font-size: 17px;
+        text-decoration: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .back-link::before { content: "‹ "; }
+
+      .page-header { padding: 0 20px 12px; }
+
+      .page-title { font-size: 26px; font-weight: 700; }
+
+      .terminal {
+        margin: 0 16px 16px;
+        background: #1c1c1e;
+        border-radius: 12px;
+        padding: 16px;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        color: #e5e5ea;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .terminal .err { color: #ff453a; }
+      .terminal .ok { color: #30d158; }
+      .terminal .warn { color: #ff9f0a; }
+      .terminal .dim { color: #8e8e93; }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="back-bar">
+        <a class="back-link" href="/">TSK Manager</a>
+      </div>
+      <header class="page-header">
+        <div class="page-title">Read Key Region (0x23)</div>
+      </header>
+      <div class="terminal" id="terminal"></div>
+    </main>
+
+    <script>
+      const terminal = document.getElementById("terminal");
+
+      function termWrite(text, className) {
+        const span = document.createElement("span");
+        if (className) span.className = className;
+        span.textContent = text + "\n";
+        terminal.appendChild(span);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+
+      function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+      async function getStatus() {
+        const r = await fetch("/api/read-mem-status", { cache: "no-store" });
+        return r.json();
+      }
+
+      function epsBusLine(s) {
+        if (s.eps_bus === undefined || s.eps_bus === -1) {
+          termWrite("EPS bus: no response on 0/1/2", "err");
+        } else {
+          termWrite("EPS bus: " + s.eps_bus, s.eps_bus === 0 ? "" : "warn");
+        }
+      }
+
+      function renderRead(s) {
+        termWrite("");
+        termWrite("Read key region — UDS 0x23", "ok");
+        termWrite("Panda: " + (s.panda || "?"));
+        epsBusLine(s);
+        termWrite("");
+        termWrite("Direct memory reads:");
+        for (const r of (s.reads || [])) {
+          const mark = r.ok ? "✓ " : "✗ ";
+          termWrite("  " + mark + r.name + " @ " + r.address + " (" + r.session + ")", r.ok ? "ok" : "err");
+          termWrite("      " + r.detail, r.ok ? "ok" : "dim");
+        }
+        termWrite("");
+        if (s.message) termWrite(s.message, s.status === "read" ? "ok" : "warn");
+        termWrite("");
+        termWrite("Screenshot ALL of this and send it to Calvin.", "dim");
+      }
+
+      async function runRead() {
+        let s = null;
+        try { s = await getStatus(); } catch (err) { /* fall through */ }
+
+        if (s && s.status === "running") {
+          termWrite("A read is already in progress — attaching...");
+        } else {
+          termWrite("Reading the key region directly (0x23). Read-only, nothing is written.", "warn");
+          try {
+            const r = await fetch("/api/read-mem", { method: "POST", cache: "no-store" });
+            const started = await r.json();
+            if (!started.ok && started.status !== "running") {
+              termWrite(started.message || "Could not start the read.", "err");
+              return;
+            }
+          } catch (err) {
+            termWrite(String(err), "err");
+            return;
+          }
+        }
+
+        termWrite("Probing addresses...");
+        let last = -1;
+        while (true) {
+          await sleep(500);
+          try { s = await getStatus(); } catch (err) { continue; }
+          if (s.status === "running") {
+            if ((s.count || 0) !== last) {
+              last = s.count || 0;
+              termWrite("  read " + last + (s.last ? "  " + s.last : ""));
+            }
+            continue;
+          }
+          if (s.status === "failed") {
+            termWrite("");
+            termWrite(s.message || "Read failed.", "err");
+            break;
+          }
+          renderRead(s);
+          break;
+        }
+      }
+
+      runRead();
+    </script>
+  </body>
+</html>
