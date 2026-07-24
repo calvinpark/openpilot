@@ -19,6 +19,7 @@ from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
 from tsk.lib.key_file_manager import KeyFileManager, format_key
 from tsk.lib.matcher import run as run_matcher
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
+from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 
 
 HOST = "0.0.0.0"
@@ -253,6 +254,20 @@ df_state = {
   "size": 0,
 }
 
+# CAN sniffer runs as a background job like the others. Read-only diagnostic: it
+# tallies raw traffic per bus and writes no file, so there is nothing to rehydrate.
+sniff_lock = threading.Lock()
+sniff_state = {
+  "status": "idle",   # idle | running | complete | failed
+  "seconds": 0.0,
+  "frames": 0,
+  "bus_count": 0,
+  "total": 0,
+  "buses": [],
+  "markers": [],
+  "message": "",
+}
+
 
 def _df_progress(status=None, frames=None, bytes_done=None, total=None, message=None) -> None:
   with df_lock:
@@ -460,6 +475,78 @@ def rehydrate_can_state() -> None:
                        message=f"Collected {sync} sync and {protected} protected frames.")
 
 
+def _sniff_progress(seconds=None, frames=None, buses=None) -> None:
+  with sniff_lock:
+    if seconds is not None:
+      sniff_state["seconds"] = seconds
+    if frames is not None:
+      sniff_state["frames"] = frames
+    if buses is not None:
+      sniff_state["bus_count"] = buses
+
+
+def _run_sniff_mock() -> None:
+  # Laptop dry run: ramp progress, then land on a plausible bus map (bus 0 carrying
+  # the SecOC markers, bus 1 with unrelated traffic, bus 2 silent) so the page
+  # layout is exercised. summarize_counts keeps the shape identical to the real run.
+  from collections import Counter
+  for i in range(1, 5):
+    time.sleep(0.4)
+    _sniff_progress(seconds=i * 2.0, frames=i * 260, buses=2)
+  demo = {
+    0: Counter({0x0f: 30, 0x2e4: 50, 0x131: 40, 0x344: 20, 0x25: 120, 0xaa: 120}),
+    1: Counter({0x3bc: 12, 0x1c4: 12}),
+  }
+  result = summarize_counts(demo, 8.0)
+  with sniff_lock:
+    sniff_state.update(status="complete", seconds=result["seconds"], frames=result["total"],
+                       total=result["total"], buses=result["buses"], markers=result["markers"],
+                       message=result["message"] + " (mock)")
+
+
+def _run_sniff_job() -> None:
+  try:
+    result = sniff_can(progress_cb=_sniff_progress)
+    with sniff_lock:
+      sniff_state.update(
+        status=result.get("status", "failed"),
+        seconds=result.get("seconds", 0.0),
+        frames=result.get("total", 0),
+        total=result.get("total", 0),
+        buses=result.get("buses", []),
+        markers=result.get("markers", []),
+        message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_sniff_mock()
+  except Exception as e:
+    with sniff_lock:
+      sniff_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_sniff_job() -> bool:
+  # panda_lock is the gate: a running extract/dump/collect holds it, so a
+  # concurrent sniff is rejected here. The job thread releases it in its finally.
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with sniff_lock:
+    sniff_state.update(status="running", seconds=0.0, frames=0, bus_count=0,
+                       total=0, buses=[], markers=[], message="")
+  try:
+    threading.Thread(target=_run_sniff_job, name="tsk_can_sniff", daemon=True).start()
+  except Exception:
+    # Same as the other jobs: release the lock and clear state if the thread that
+    # would release it never starts.
+    with sniff_lock:
+      sniff_state.update(status="failed", message="Could not start the sniff job.")
+    panda_lock.release()
+    return False
+  return True
+
+
 class TSKWebHandler(BaseHTTPRequestHandler):
   server_version = "TSKWeb/0.1"
 
@@ -660,6 +747,17 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/can-sniff":
+      if not start_sniff_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
     if path == "/api/clear-cache":
       with can_lock:
         can_running = can_state["status"] == "running"
@@ -709,6 +807,12 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/dataflash-status":
       with df_lock:
         payload = dict(df_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/can-sniff-status":
+      with sniff_lock:
+        payload = dict(sniff_state)
       self._send_json(payload, send_body=send_body)
       return
 
