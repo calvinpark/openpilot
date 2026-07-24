@@ -21,6 +21,7 @@ from tsk.lib.matcher import run as run_matcher
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
 from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 from tsk.lib.dump_diag import diagnose as dump_diagnose
+from tsk.lib.prog_probe import probe_programming
 
 
 HOST = "0.0.0.0"
@@ -285,6 +286,20 @@ diag_state = {
   "traceback": "",
   "frames": 0,
   "bytes": 0,
+  "message": "",
+}
+
+# Programming-session entry probe. Tries several ways to enter the PROGRAMMING session
+# on the EPS the sweep finds, and holds the per-sequence outcomes + the security result.
+probe_lock = threading.Lock()
+probe_state = {
+  "status": "idle",   # idle | running | entered | blocked | unreachable | failed
+  "attempt_count": 0,
+  "last": "",
+  "panda": "",
+  "eps_bus": -1,
+  "attempts": [],
+  "security": {},
   "message": "",
 }
 
@@ -656,6 +671,84 @@ def start_diag_job() -> bool:
   return True
 
 
+def _probe_progress(attempts=None, last=None) -> None:
+  with probe_lock:
+    if attempts is not None:
+      probe_state["attempt_count"] = attempts
+    if last is not None:
+      probe_state["last"] = last
+
+
+def _run_probe_mock() -> None:
+  # Laptop dry run: EPS on bus 1, every entry sequence times out, and the security
+  # attempt returns a seed but rejects the Willem key — the expected out-of-family shape.
+  names = ("extended -> programming (3s)", "double programming (1s settle)",
+           "default -> programming direct", "tester-present -> programming",
+           "security-first -> programming")
+  for i, name in enumerate(names, 1):
+    time.sleep(0.3)
+    _probe_progress(attempts=i, last=name)
+  timeout = "MessageTimeoutError: timeout waiting for response"
+  with probe_lock:
+    probe_state.update(
+      status="blocked",
+      attempt_count=5,
+      last=names[-1],
+      panda="1.7.0-mock",
+      eps_bus=1,
+      attempts=[
+        {"name": names[0], "ok": False, "detail": timeout},
+        {"name": names[1], "ok": False, "detail": timeout},
+        {"name": names[2], "ok": False, "detail": timeout},
+        {"name": names[3], "ok": False, "detail": timeout},
+        {"name": names[4], "ok": False, "detail": "send_key NRC 0x35 invalid key"},
+      ],
+      security={"seed": "0011223344556677", "send_key": "NRC 0x35 invalid key", "programming": ""},
+      message="No sequence entered the programming session on bus 1. The entry sequence "
+              "for this EPS is unknown — the firmware-dump path is next. (mock)",
+    )
+
+
+def _run_probe_job() -> None:
+  try:
+    result = probe_programming(progress_cb=_probe_progress)
+    with probe_lock:
+      probe_state.update(
+        status=result.get("status", "failed"),
+        panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1),
+        attempts=result.get("attempts", []),
+        attempt_count=len(result.get("attempts", [])),
+        security=result.get("security", {}),
+        message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_probe_mock()
+  except Exception as e:
+    with probe_lock:
+      probe_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_probe_job() -> bool:
+  # panda_lock gates it against extract/dump/collect/sniff/diag, released in the finally.
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with probe_lock:
+    probe_state.update(status="running", attempt_count=0, last="", panda="", eps_bus=-1,
+                       attempts=[], security={}, message="")
+  try:
+    threading.Thread(target=_run_probe_job, name="tsk_prog_probe", daemon=True).start()
+  except Exception:
+    with probe_lock:
+      probe_state.update(status="failed", message="Could not start the probe job.")
+    panda_lock.release()
+    return False
+  return True
+
+
 class TSKWebHandler(BaseHTTPRequestHandler):
   server_version = "TSKWeb/0.1"
 
@@ -867,6 +960,17 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/prog-probe":
+      if not start_probe_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
     if path == "/api/dataflash-diag":
       if not start_diag_job():
         self._send_json({
@@ -939,6 +1043,12 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/dataflash-diag-status":
       with diag_lock:
         payload = dict(diag_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/prog-probe-status":
+      with probe_lock:
+        payload = dict(probe_state)
       self._send_json(payload, send_body=send_body)
       return
 
