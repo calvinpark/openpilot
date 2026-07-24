@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Programming Preamble</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .page {
+        width: min(100vw, 460px);
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 100vh;
+      }
+
+      .back-bar { padding: 12px 20px; }
+
+      .back-link {
+        color: #007aff;
+        font-size: 17px;
+        text-decoration: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .back-link::before { content: "‹ "; }
+
+      .page-header { padding: 0 20px 12px; }
+
+      .page-title { font-size: 26px; font-weight: 700; }
+
+      .terminal {
+        margin: 0 16px 16px;
+        background: #1c1c1e;
+        border-radius: 12px;
+        padding: 16px;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        color: #e5e5ea;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .terminal .err { color: #ff453a; }
+      .terminal .ok { color: #30d158; }
+      .terminal .warn { color: #ff9f0a; }
+      .terminal .dim { color: #8e8e93; }
+      .terminal .big { font-size: 14px; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="back-bar">
+        <a class="back-link" href="/">TSK Manager</a>
+      </div>
+      <header class="page-header">
+        <div class="page-title">Programming Preamble</div>
+      </header>
+      <div class="terminal" id="terminal"></div>
+    </main>
+
+    <script>
+      const terminal = document.getElementById("terminal");
+
+      function termWrite(text, className) {
+        const span = document.createElement("span");
+        if (className) span.className = className;
+        span.textContent = text + "\n";
+        terminal.appendChild(span);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+
+      function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+      async function getStatus() {
+        const r = await fetch("/api/preamble-status", { cache: "no-store" });
+        return r.json();
+      }
+
+      function epsBusLine(s) {
+        if (s.eps_bus === undefined || s.eps_bus === -1) {
+          termWrite("EPS bus: no response on 0/1/2", "err");
+        } else {
+          termWrite("EPS bus: " + s.eps_bus, s.eps_bus === 0 ? "" : "warn");
+        }
+      }
+
+      function detailClass(detail) {
+        if (!detail) return "dim";
+        if (detail.indexOf("seed ") === 0) return "ok";
+        if (detail.indexOf("ACCEPTED") === 0) return "ok";
+        if (detail.indexOf("accepted") === 0) return "ok";
+        if (detail.indexOf("NRC") === 0) return "warn";
+        if (detail.indexOf("sent") === 0) return "dim";
+        return "err";
+      }
+
+      function writeList(title, rows) {
+        if (!rows || !rows.length) return;
+        termWrite("");
+        termWrite(title, "dim");
+        for (const r of rows) {
+          termWrite("  " + r.name + ": " + r.detail, detailClass(r.detail));
+        }
+      }
+
+      function render(s) {
+        termWrite("");
+        termWrite("Pre-programming preamble probe", "ok");
+        termWrite("Panda: " + (s.panda || "?"));
+        epsBusLine(s);
+
+        writeList("Identity", s.identity);
+
+        const lock = s.lock || {};
+        if (lock.seed_03 || lock.seed_01_baseline) {
+          termWrite("");
+          termWrite("Lock read (is security locked from the last send-key?)", "dim");
+          termWrite("  extended: " + (lock.extended || "?"), detailClass(lock.extended));
+          termWrite("  seed 0x03: " + (lock.seed_03 || "?"), detailClass(lock.seed_03));
+          termWrite("  seed 0x01 baseline: " + (lock.seed_01_baseline || "?"),
+                    detailClass(lock.seed_01_baseline));
+        }
+
+        writeList("Exploit surface (refusal codes only, nothing written)", s.services);
+
+        for (const v of (s.variants || [])) {
+          termWrite("");
+          const head = v.name + "  → " + (v.opened ? "LEVEL 0x01 OPENED"
+                       : (v.programming === "ACCEPTED" ? "PROGRAMMING ACCEPTED" : "refused"));
+          termWrite(head, v.opened || v.programming === "ACCEPTED" ? "ok" : "warn");
+          for (const st of (v.steps || [])) {
+            termWrite("  " + st.step + ": " + st.detail, detailClass(st.detail));
+          }
+          termWrite("  programming: " + v.programming, detailClass(v.programming));
+          termWrite("  session after: " + v.session_after,
+                    v.session_after === "0x02" ? "ok" : "dim");
+          termWrite("  seed 0x01 after: " + v.seed_01_after, detailClass(v.seed_01_after));
+        }
+
+        const dtc = s.dtc || {};
+        if (dtc.before || dtc.after) {
+          termWrite("");
+          termWrite("DTC diff", "dim");
+          termWrite("  before: " + ((dtc.before || []).length) + " codes");
+          termWrite("  after:  " + ((dtc.after || []).length) + " codes");
+          if ((dtc.new || []).length) {
+            termWrite("  NEW: " + dtc.new.join(", "), "warn");
+          } else {
+            termWrite("  no new codes", "dim");
+          }
+        }
+
+        writeList("Read memory retry", s.reads);
+
+        if (s.liveness) {
+          termWrite("");
+          termWrite(s.liveness, s.liveness.indexOf("still") >= 0 ? "dim" : "warn");
+        }
+
+        termWrite("");
+        if (s.message) {
+          const big = s.status === "security_open" || s.status === "programming_open";
+          const cls = big ? "ok big" : (s.status === "locked" ? "err" : "warn");
+          termWrite(s.message, cls);
+        }
+        termWrite("");
+        termWrite("Screenshot ALL of this and send it to Calvin.", "dim");
+      }
+
+      async function run() {
+        let s = null;
+        try { s = await getStatus(); } catch (err) { /* fall through */ }
+
+        if (s && s.status === "running") {
+          termWrite("A probe is already in progress — attaching...");
+        } else {
+          termWrite("No security key is sent and no attempt counter is touched.", "dim");
+          termWrite("This briefly turns off EPS fault logging and its normal CAN output, then "
+                    + "puts both back at the end. A power cycle also restores them.", "warn");
+          try {
+            const r = await fetch("/api/preamble-probe", { method: "POST", cache: "no-store" });
+            const started = await r.json();
+            if (!started.ok && started.status !== "running") {
+              termWrite(started.message || "Could not start the probe.", "err");
+              return;
+            }
+          } catch (err) {
+            termWrite(String(err), "err");
+            return;
+          }
+        }
+
+        termWrite("Running — about a minute. Leave this screen open; it prints each step.");
+        let last = -1;
+        while (true) {
+          await sleep(500);
+          try { s = await getStatus(); } catch (err) { continue; }
+          if (s.status === "running") {
+            if ((s.count || 0) !== last) {
+              last = s.count || 0;
+              termWrite("  step " + last + (s.last ? "  " + s.last : ""));
+            }
+            continue;
+          }
+          if (s.status === "failed") {
+            termWrite("");
+            termWrite(s.message || "Probe failed.", "err");
+            break;
+          }
+          render(s);
+          break;
+        }
+      }
+
+      run();
+    </script>
+  </body>
+</html>

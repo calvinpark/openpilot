@@ -27,6 +27,7 @@ from tsk.lib.ident_map import map_surface
 from tsk.lib.reset_probe import probe_reset_window
 from tsk.lib.level3_probe import probe_level3
 from tsk.lib.sendkey_probe import send_willem_key
+from tsk.lib.preamble_probe import probe_preamble
 
 
 HOST = "0.0.0.0"
@@ -377,6 +378,25 @@ sendkey_state = {
   "key": "",
   "send_key": "",
   "post_unlock_reads": [],
+  "message": "",
+}
+
+# Pre-programming preamble probe — lock read + exploit-surface refusal codes + the 0x85/0x28
+# preamble variants + a DTC diff. No key sent, no attempt counter touched.
+preamble_lock = threading.Lock()
+preamble_state = {
+  "status": "idle",   # idle | running | security_open | programming_open | locked | blocked | dropped_out | unreachable | failed
+  "count": 0,
+  "last": "",
+  "panda": "",
+  "eps_bus": -1,
+  "identity": [],
+  "lock": {},
+  "services": [],
+  "variants": [],
+  "dtc": {},
+  "reads": [],
+  "liveness": "",
   "message": "",
 }
 
@@ -1199,6 +1219,127 @@ def start_sendkey_job() -> bool:
   return True
 
 
+def _preamble_progress(steps=None, last=None) -> None:
+  with preamble_lock:
+    if steps is not None:
+      preamble_state["count"] = steps
+    if last is not None:
+      preamble_state["last"] = last
+
+
+def _run_preamble_mock() -> None:
+  # Laptop dry run: the expected in-car shape — no lock, programming still refused, and
+  # the DTC diff empty (the reading that points at a lower-layer drop).
+  for i, name in enumerate(("lock read", "0x01 baseline", "exploit surface",
+                            "0x85 -> programming", "0x85 + 0x28 -> programming",
+                            "0x85 + 0x28 -> programming (6s)",
+                            "0x85 + 0x28 -> 10 82 suppressed",
+                            "functional 0x28 -> programming", "DTC diff"), 1):
+    time.sleep(0.25)
+    _preamble_progress(steps=i, last=name)
+
+  def variant(name, prog):
+    return {
+      "name": name, "opened": False, "programming": prog, "session_after": "0x03",
+      "seed_01_after": "NRC 0x7e subFunctionNotSupportedInActiveSession",
+      "steps": [
+        {"step": "extended", "detail": "accepted"},
+        {"step": "0x85 DTC off", "detail": "accepted"},
+        {"step": "0x28 disable tx", "detail": "accepted"},
+      ],
+    }
+
+  with preamble_lock:
+    preamble_state.update(
+      status="blocked", count=9, last="DTC diff", panda="1.7.0-mock", eps_bus=1,
+      identity=[
+        {"name": "app_sw_id", "ok": True, "detail": "8965F1208000 (383936354631323038303030)"},
+        {"name": "ecu_serial", "ok": True, "detail": "8965012N50E12H030731 (38393635…)"},
+        {"name": "active_session", "ok": True, "detail": "0x03"},
+      ],
+      lock={
+        "extended": "accepted",
+        "seed_03": "seed 5b1e9c77aa304f628d1b0e5942cf7a83",
+        "seed_01_baseline": "NRC 0x7e subFunctionNotSupportedInActiveSession",
+        "locked": False,
+      },
+      services=[
+        {"name": "extended", "ok": True, "detail": "accepted"},
+        {"name": "read DID 0x201 (did_201_key)", "ok": False,
+         "detail": "NRC 0x31 requestOutOfRange"},
+        {"name": "read DID 0x202 (did_202_iv)", "ok": False,
+         "detail": "NRC 0x31 requestOutOfRange"},
+        {"name": "read DID 0x203 (did_203_state)", "ok": False,
+         "detail": "NRC 0x31 requestOutOfRange"},
+        {"name": "routine results 0x10f0", "ok": False,
+         "detail": "NRC 0x7f serviceNotSupportedInActiveSession"},
+        {"name": "request download (RAM)", "ok": False,
+         "detail": "NRC 0x7f serviceNotSupportedInActiveSession"},
+        {"name": "0x85 DTC setting OFF", "ok": True, "detail": "accepted"},
+        {"name": "0x28 comm control disable-tx", "ok": True, "detail": "accepted"},
+        {"name": "DTC snapshot (before)", "ok": True, "detail": "3 codes"},
+      ],
+      variants=[
+        variant("0x85 -> programming", "MessageTimeoutError"),
+        variant("0x85 + 0x28 -> programming", "MessageTimeoutError"),
+        variant("0x85 + 0x28 -> programming (6s)", "MessageTimeoutError"),
+        variant("0x85 + 0x28 -> 10 82 suppressed", "sent (suppressed) — see session read"),
+        variant("functional 0x28 -> programming", "MessageTimeoutError"),
+      ],
+      dtc={"before": ["c11234:08", "c15678:2f", "c1aa01:08"],
+           "after": ["c11234:08", "c15678:2f", "c1aa01:08"], "new": []},
+      reads=[
+        {"name": "key region 0xff206e14", "ok": False, "detail": "NRC 0x31 requestOutOfRange"},
+        {"name": "dataflash base 0xff200000", "ok": False, "detail": "NRC 0x31 requestOutOfRange"},
+        {"name": "ram window 0xfebf0000", "ok": False, "detail": "NRC 0x31 requestOutOfRange"},
+      ],
+      liveness="EPS still answering at end of run",
+      message="Programming still refused with the pre-programming preamble (0 new DTC(s)). "
+              "Level 0x01 stayed shut. Screenshot and send to Calvin — the DTC diff and the "
+              "service refusal codes are the useful part of this run even though programming "
+              "did not open. (mock)",
+    )
+
+
+def _run_preamble_job() -> None:
+  try:
+    result = probe_preamble(progress_cb=_preamble_progress)
+    with preamble_lock:
+      preamble_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), identity=result.get("identity", []),
+        lock=result.get("lock", {}), services=result.get("services", []),
+        variants=result.get("variants", []), dtc=result.get("dtc", {}),
+        reads=result.get("reads", []), liveness=result.get("liveness", ""),
+        message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_preamble_mock()
+  except Exception as e:
+    with preamble_lock:
+      preamble_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_preamble_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with preamble_lock:
+    preamble_state.update(status="running", count=0, last="", panda="", eps_bus=-1,
+                          identity=[], lock={}, services=[], variants=[], dtc={},
+                          reads=[], liveness="", message="")
+  try:
+    threading.Thread(target=_run_preamble_job, name="tsk_preamble_probe", daemon=True).start()
+  except Exception:
+    with preamble_lock:
+      preamble_state.update(status="failed", message="Could not start the preamble probe.")
+    panda_lock.release()
+    return False
+  return True
+
+
 class TSKWebHandler(BaseHTTPRequestHandler):
   server_version = "TSKWeb/0.1"
 
@@ -1476,6 +1617,17 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/preamble-probe":
+      if not start_preamble_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
     if path == "/api/sendkey-probe":
       if not start_sendkey_job():
         self._send_json({
@@ -1584,6 +1736,12 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/sendkey-status":
       with sendkey_lock:
         payload = dict(sendkey_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/preamble-status":
+      with preamble_lock:
+        payload = dict(preamble_state)
       self._send_json(payload, send_body=send_body)
       return
 
