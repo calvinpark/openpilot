@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Send Willem Key (0x03/0x04)</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .page {
+        width: min(100vw, 460px);
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 100vh;
+      }
+
+      .back-bar { padding: 12px 20px; }
+
+      .back-link {
+        color: #007aff;
+        font-size: 17px;
+        text-decoration: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .back-link::before { content: "‹ "; }
+
+      .page-header { padding: 0 20px 12px; }
+
+      .page-title { font-size: 26px; font-weight: 700; }
+
+      .warn-card {
+        margin: 0 16px 12px;
+        background: #fff;
+        border-radius: 12px;
+        padding: 16px;
+        font-size: 14px;
+        line-height: 1.45;
+        color: #1c1c1e;
+      }
+
+      .warn-card b { color: #c93400; }
+
+      .run-btn {
+        display: block;
+        width: calc(100% - 32px);
+        margin: 0 16px 12px;
+        padding: 14px;
+        border: none;
+        border-radius: 12px;
+        background: #ff9f0a;
+        color: #1c1c1e;
+        font-size: 17px;
+        font-weight: 600;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .run-btn:disabled { background: #d1d1d6; color: #8e8e93; }
+
+      .terminal {
+        margin: 0 16px 16px;
+        background: #1c1c1e;
+        border-radius: 12px;
+        padding: 16px;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        color: #e5e5ea;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .terminal .err { color: #ff453a; }
+      .terminal .ok { color: #30d158; }
+      .terminal .warn { color: #ff9f0a; }
+      .terminal .dim { color: #8e8e93; }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="back-bar">
+        <a class="back-link" href="/">TSK Manager</a>
+      </div>
+      <header class="page-header">
+        <div class="page-title">Send Willem Key</div>
+      </header>
+      <div class="warn-card">
+        This sends <b>one</b> security key (level 0x03/0x04) computed with the Sienna secret,
+        to test whether the Corolla shares it. A wrong key can <b>temporarily lock</b> the EPS
+        security. Run it <b>once</b>; if it says invalid or locked, power-cycle the panda /
+        re-enter Not Ready to Drive before trying again.
+      </div>
+      <button class="run-btn" id="runBtn">Send the key once</button>
+      <div class="terminal" id="terminal"></div>
+    </main>
+
+    <script>
+      const terminal = document.getElementById("terminal");
+      const runBtn = document.getElementById("runBtn");
+
+      function termWrite(text, className) {
+        const span = document.createElement("span");
+        if (className) span.className = className;
+        span.textContent = text + "\n";
+        terminal.appendChild(span);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+
+      function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+      async function getStatus() {
+        const r = await fetch("/api/sendkey-status", { cache: "no-store" });
+        return r.json();
+      }
+
+      function epsBusLine(s) {
+        if (s.eps_bus === undefined || s.eps_bus === -1) {
+          termWrite("EPS bus: no response on 0/1/2", "err");
+        } else {
+          termWrite("EPS bus: " + s.eps_bus, s.eps_bus === 0 ? "" : "warn");
+        }
+      }
+
+      function render(s) {
+        termWrite("");
+        termWrite("Send Willem key — level 0x03/0x04", "ok");
+        termWrite("Panda: " + (s.panda || "?"));
+        epsBusLine(s);
+        termWrite("Session: " + (s.session || "?"), s.session === "extended" ? "" : "warn");
+        termWrite("");
+        termWrite("Seed: " + (s.seed || "-"), s.seed ? "" : "dim");
+        termWrite("Key : " + (s.key || "-"), s.key ? "" : "dim");
+        const skClass = s.status === "unlocked" ? "ok" : "err";
+        termWrite("Send key: " + (s.send_key || "-"), skClass);
+        if ((s.post_unlock_reads || []).length) {
+          termWrite("");
+          termWrite("Post-unlock 0x23 reads:");
+          for (const r of s.post_unlock_reads) {
+            const mark = r.ok ? "✓ " : "✗ ";
+            termWrite("  " + mark + r.name + " @ " + r.address, r.ok ? "ok" : "err");
+            termWrite("      " + r.detail, r.ok ? "ok" : "dim");
+          }
+        }
+        termWrite("");
+        if (s.message) {
+          const cls = s.status === "unlocked" ? "ok" : (s.status === "invalid_key" ? "warn" : "err");
+          termWrite(s.message, cls);
+        }
+        termWrite("");
+        termWrite("Screenshot ALL of this and send it to Calvin.", "dim");
+      }
+
+      async function run() {
+        runBtn.disabled = true;
+        runBtn.textContent = "Sending...";
+        try {
+          const r = await fetch("/api/sendkey-probe", { method: "POST", cache: "no-store" });
+          const started = await r.json();
+          if (!started.ok && started.status !== "running") {
+            termWrite(started.message || "Could not start.", "err");
+            runBtn.disabled = false;
+            runBtn.textContent = "Send the key once";
+            return;
+          }
+        } catch (err) {
+          termWrite(String(err), "err");
+          runBtn.disabled = false;
+          runBtn.textContent = "Send the key once";
+          return;
+        }
+
+        termWrite("Requesting seed, computing key, sending once...");
+        let s = null;
+        while (true) {
+          await sleep(500);
+          try { s = await getStatus(); } catch (err) { continue; }
+          if (s.status === "running") continue;
+          if (s.status === "failed") {
+            termWrite("");
+            termWrite(s.message || "Failed.", "err");
+            break;
+          }
+          render(s);
+          break;
+        }
+        runBtn.textContent = "Done — run once only";
+      }
+
+      runBtn.addEventListener("click", run);
+    </script>
+  </body>
+</html>

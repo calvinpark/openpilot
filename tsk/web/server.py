@@ -25,6 +25,8 @@ from tsk.lib.prog_probe import probe_programming
 from tsk.lib.read_mem import read_key_region
 from tsk.lib.ident_map import map_surface
 from tsk.lib.reset_probe import probe_reset_window
+from tsk.lib.level3_probe import probe_level3
+from tsk.lib.sendkey_probe import send_willem_key
 
 
 HOST = "0.0.0.0"
@@ -346,6 +348,35 @@ reset_state = {
   "reset": "",
   "attempts": [],
   "session_after": "",
+  "message": "",
+}
+
+# Level 0x03 seed isolation probe — seed-only (no key sent), safe to re-run.
+level3_lock = threading.Lock()
+level3_state = {
+  "status": "idle",   # idle | running | reproduced | conditional | no_seed | unreachable | failed
+  "count": 0,
+  "last": "",
+  "panda": "",
+  "eps_bus": -1,
+  "tests": [],
+  "seeds": [],
+  "primer": "",
+  "message": "",
+}
+
+# Send-key probe — one Willem key at level 0x03/0x04.
+sendkey_lock = threading.Lock()
+sendkey_state = {
+  "status": "idle",   # idle | running | unlocked | invalid_key | locked | denied | no_seed | unreachable | failed
+  "last": "",
+  "panda": "",
+  "eps_bus": -1,
+  "session": "",
+  "seed": "",
+  "key": "",
+  "send_key": "",
+  "post_unlock_reads": [],
   "message": "",
 }
 
@@ -1015,6 +1046,159 @@ def start_reset_job() -> bool:
   return True
 
 
+def _level3_progress(tests=None, last=None) -> None:
+  with level3_lock:
+    if tests is not None:
+      level3_state["count"] = tests
+    if last is not None:
+      level3_state["last"] = last
+
+
+def _run_level3_mock() -> None:
+  # Laptop dry run: the reproduced shape — 0x03 answers from a clean extended session.
+  for i, name in enumerate(("clean extended (0x03 first)", "default session (no extended)",
+                            "0x01 first, then 0x03", "programming poke, then 0x03"), 1):
+    time.sleep(0.3)
+    _level3_progress(tests=i, last=name)
+  with level3_lock:
+    level3_state.update(
+      status="reproduced", count=4, last="programming poke, then 0x03", panda="1.7.0-mock", eps_bus=1,
+      seeds=["da2df2eff64d95f5426bf3af70bb49aa", "1c9a4f0b77e3d5218a6c4b0fe29d3a11",
+             "77aa10c4be5518e2049f3c6d1b8e720d", "9be1035fac82d4761e0b5528cf94a6d3"],
+      primer="",
+      tests=[
+        {"name": "clean extended (0x03 first)", "got_seed": True,
+         "seed": "da2df2eff64d95f5426bf3af70bb49aa",
+         "steps": [
+           {"step": "default", "detail": "accepted"},
+           {"step": "extended", "detail": "accepted"},
+           {"step": "seed 0x03", "detail": "seed da2df2eff64d95f5426bf3af70bb49aa"},
+           {"step": "seed 0x03 again", "detail": "seed 1c9a4f0b77e3d5218a6c4b0fe29d3a11"},
+         ]},
+        {"name": "default session (no extended)", "got_seed": False, "seed": "",
+         "steps": [
+           {"step": "default", "detail": "accepted"},
+           {"step": "seed 0x03", "detail": "NRC 0x7e subFunctionNotSupportedInActiveSession"},
+         ]},
+        {"name": "0x01 first, then 0x03", "got_seed": True,
+         "seed": "77aa10c4be5518e2049f3c6d1b8e720d",
+         "steps": [
+           {"step": "default", "detail": "accepted"},
+           {"step": "extended", "detail": "accepted"},
+           {"step": "seed 0x01", "detail": "NRC 0x7e subFunctionNotSupportedInActiveSession"},
+           {"step": "seed 0x03", "detail": "seed 77aa10c4be5518e2049f3c6d1b8e720d"},
+         ]},
+        {"name": "programming poke, then 0x03", "got_seed": True,
+         "seed": "9be1035fac82d4761e0b5528cf94a6d3",
+         "steps": [
+           {"step": "default", "detail": "accepted"},
+           {"step": "extended", "detail": "accepted"},
+           {"step": "poke programming", "detail": "sent 10 02 (ignored response)"},
+           {"step": "seed 0x03", "detail": "seed 9be1035fac82d4761e0b5528cf94a6d3"},
+         ]},
+      ],
+      message="Level 0x03 returned a seed from a clean extended session on bus 1 (seeds differ each "
+              "request) — it is its own input/output, not a side effect of prior traffic. (mock)",
+    )
+
+
+def _run_level3_job() -> None:
+  try:
+    result = probe_level3(progress_cb=_level3_progress)
+    with level3_lock:
+      level3_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), tests=result.get("tests", []),
+        seeds=result.get("seeds", []), primer=result.get("primer", ""),
+        count=len(result.get("tests", [])), message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_level3_mock()
+  except Exception as e:
+    with level3_lock:
+      level3_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_level3_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with level3_lock:
+    level3_state.update(status="running", count=0, last="", panda="", eps_bus=-1,
+                        tests=[], seeds=[], primer="", message="")
+  try:
+    threading.Thread(target=_run_level3_job, name="tsk_level3_probe", daemon=True).start()
+  except Exception:
+    with level3_lock:
+      level3_state.update(status="failed", message="Could not start the level-0x03 probe.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def _sendkey_progress(step=None, last=None) -> None:
+  with sendkey_lock:
+    if last is not None:
+      sendkey_state["last"] = last
+
+
+def _run_sendkey_mock() -> None:
+  # Laptop dry run: the realistic shape — the Sienna secret is rejected on the Corolla.
+  for step in ("extended", "seed", "key", "send_key"):
+    time.sleep(0.25)
+    _sendkey_progress(step=step, last=step)
+  with sendkey_lock:
+    sendkey_state.update(
+      status="invalid_key", last="send_key", panda="1.7.0-mock", eps_bus=1, session="extended",
+      seed="da2df2eff64d95f5426bf3af70bb49aa",
+      key="3f9c1a04d8b27e6510c23a9fbe4d7182",
+      send_key="NRC 0x35 invalidKey",
+      post_unlock_reads=[],
+      message="Willem key rejected (invalid key) — the Corolla uses a different seed->key secret. "
+              "The firmware-dump path is needed to recover it. (mock)",
+    )
+
+
+def _run_sendkey_job() -> None:
+  try:
+    result = send_willem_key(progress_cb=_sendkey_progress)
+    with sendkey_lock:
+      sendkey_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), session=result.get("session", ""),
+        seed=result.get("seed", ""), key=result.get("key", ""),
+        send_key=result.get("send_key", ""),
+        post_unlock_reads=result.get("post_unlock_reads", []),
+        message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_sendkey_mock()
+  except Exception as e:
+    with sendkey_lock:
+      sendkey_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_sendkey_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with sendkey_lock:
+    sendkey_state.update(status="running", last="", panda="", eps_bus=-1, session="",
+                         seed="", key="", send_key="", post_unlock_reads=[], message="")
+  try:
+    threading.Thread(target=_run_sendkey_job, name="tsk_sendkey_probe", daemon=True).start()
+  except Exception:
+    with sendkey_lock:
+      sendkey_state.update(status="failed", message="Could not start the send-key probe.")
+    panda_lock.release()
+    return False
+  return True
+
+
 class TSKWebHandler(BaseHTTPRequestHandler):
   server_version = "TSKWeb/0.1"
 
@@ -1281,6 +1465,28 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/level3-probe":
+      if not start_level3_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
+    if path == "/api/sendkey-probe":
+      if not start_sendkey_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
     if path == "/api/clear-cache":
       with can_lock:
         can_running = can_state["status"] == "running"
@@ -1366,6 +1572,18 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/reset-probe-status":
       with reset_lock:
         payload = dict(reset_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/level3-status":
+      with level3_lock:
+        payload = dict(level3_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/sendkey-status":
+      with sendkey_lock:
+        payload = dict(sendkey_state)
       self._send_json(payload, send_body=send_body)
       return
 
