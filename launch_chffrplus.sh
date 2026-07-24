@@ -86,9 +86,9 @@ function launch {
   sudo mkdir -p /cache/params
   sudo chown comma:comma /cache/params
 
-  # TSK: prefetch recommended and alternate openpilot branches
+  # TSK: prefetch skipped — this diagnostic build doesn't use the install buttons,
+  # so the recommended/alternate clones aren't needed and the boot isn't blocked on them.
   cd $DIR
-  python3 tsk/prefetch.py
 
   # TSK: start web server before the manager so it survives manager kills
   python3 -m tsk.web.server &

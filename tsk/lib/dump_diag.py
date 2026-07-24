@@ -22,12 +22,17 @@ from pathlib import Path
 from tsk.lib.env import is_agnos, DATAFLASH_PAYLOAD_PATH
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import (
-  ADDR, BUS, DUMP_START, DUMP_TOTAL, PAYLOAD_LOAD_ADDR, PAYLOAD_LOAD_SIZE,
+  ADDR, DUMP_START, DUMP_TOTAL, PAYLOAD_LOAD_ADDR, PAYLOAD_LOAD_SIZE,
   PAYLOAD_SHA256, TRIGGER_ADDR, TRIGGER_SIZE, RESPONSE_PENDING,
 )
 
 DIAG_COLLECT_SECONDS = 30.0   # shorter than the production 240s cap — a probe, not a full dump
 DIAG_IDLE_TIMEOUT = 5.0
+
+# TSKM talks UDS on bus 0 by default, but a car can route the EPS diagnostic onto a
+# different panda bus number (the "swap" case). Probe these in order and run the whole
+# flow on the first bus the EPS answers on; silence on all three is the routing signal.
+CANDIDATE_BUSES = [0, 1, 2]
 
 # EPS identity DIDs worth reading on an unknown ECU. The spare-part number (0xF187)
 # and application SW id (0xF181) carry the 8965B... string that names the EPS variant;
@@ -78,7 +83,7 @@ def diagnose(progress_cb=None) -> dict:
   steps: list = []
   identity: list = []
   result = {
-    "status": "failed", "panda": "", "identity": identity, "steps": steps,
+    "status": "failed", "panda": "", "eps_bus": -1, "identity": identity, "steps": steps,
     "failed_at": "", "exception": "", "traceback": "", "frames": 0, "bytes": 0,
     "message": "",
   }
@@ -136,16 +141,33 @@ def diagnose(progress_cb=None) -> dict:
     result["message"] = "No panda / connect failed. Check the harness."
     return result
 
-  uds = UdsClient(panda, ADDR, ADDR + 8, BUS, timeout=0.2, response_pending_timeout=0.2)
-
-  # Phase B: session control DEFAULT -> EXTENDED (record each), then identity sweep in
-  # extended session where more DIDs answer. Production timing preserved.
-  ok, _ = call("session DEFAULT", lambda: uds.diagnostic_session_control(SESSION_TYPE.DEFAULT))
-  time.sleep(0.5)
-  if not ok:
+  # Phase B: find the bus the EPS answers on. A negative response still means the EPS
+  # is on that bus and talking; a timeout on all three is the routing/pin signal.
+  eps_bus = None
+  uds = None
+  for cand in CANDIDATE_BUSES:
+    t0 = time.time()
+    probe = UdsClient(panda, ADDR, ADDR + 8, cand, timeout=0.2, response_pending_timeout=0.2)
+    try:
+      probe.diagnostic_session_control(SESSION_TYPE.DEFAULT)
+      record(f"probe bus {cand} (default session)", True, "EPS responded", t0)
+      eps_bus, uds = cand, probe
+      break
+    except NegativeResponseError as e:
+      record(f"probe bus {cand} (default session)", True, f"EPS responded ({nrc(e.error_code)})", t0)
+      eps_bus, uds = cand, probe
+      break
+    except Exception as e:
+      record(f"probe bus {cand} (default session)", False,
+             f"{type(e).__name__}: {e}" if str(e) else type(e).__name__, t0)
+  result["eps_bus"] = eps_bus if eps_bus is not None else -1
+  if uds is None:
     result["status"] = "rejected"
-    result["message"] = "EPS did not answer the default diagnostic session."
+    result["message"] = ("EPS did not answer on bus 0, 1, or 2. The diagnostic channel is not on a "
+                         "bus the panda reaches — a harness/routing issue, or the EPS is unpowered "
+                         "in this car state.")
     return result
+  time.sleep(0.5)
 
   call("session EXTENDED", lambda: uds.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC))
   time.sleep(0.7)
@@ -229,8 +251,8 @@ def diagnose(progress_cb=None) -> dict:
   t0 = time.time()
   try:
     erase = b"\x31\x01\xff\x00" + b"\x45\x00" + struct.pack("!I", TRIGGER_ADDR) + struct.pack("!I", TRIGGER_SIZE)
-    isotp_send(panda, erase, ADDR, bus=BUS)
-    record("trigger erase", True, "sent", t0)
+    isotp_send(panda, erase, ADDR, bus=eps_bus)
+    record("trigger erase", True, f"sent on bus {eps_bus}", t0)
   except Exception as e:
     record("trigger erase", False, f"{type(e).__name__}: {e}" if str(e) else type(e).__name__, t0)
 
@@ -246,7 +268,7 @@ def diagnose(progress_cb=None) -> dict:
     except Exception:
       break
     for addr, *_, data, bus in recv:
-      if bus != BUS or addr != ADDR + 8 or len(data) < 8 or data == RESPONSE_PENDING:
+      if bus != eps_bus or addr != ADDR + 8 or len(data) < 8 or data == RESPONSE_PENDING:
         continue
       ptr = (struct.unpack("<I", data[:4])[0] >> 8) & 0xFFFFFF
       off = ((DUMP_START & 0xFF000000) | ptr) - DUMP_START

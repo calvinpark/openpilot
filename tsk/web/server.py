@@ -277,6 +277,7 @@ diag_state = {
   "step_count": 0,
   "last": "",
   "panda": "",
+  "eps_bus": -1,
   "identity": [],
   "steps": [],
   "failed_at": "",
@@ -586,6 +587,7 @@ def _run_diag_mock() -> None:
       step_count=7,
       last="security SEND_KEY",
       panda="1.7.0-mock",
+      eps_bus=0,
       identity=[
         {"did": "0xf181", "name": "app_sw_id", "hex": "018965b0000000", "ascii": ".8965B......"},
         {"did": "0xf187", "name": "spare_part_no", "hex": "3839363542", "ascii": "8965B"},
@@ -593,7 +595,7 @@ def _run_diag_mock() -> None:
       ],
       steps=[
         {"name": "connect panda", "ok": True, "detail": "fw 1.7.0-mock", "ms": 42},
-        {"name": "session DEFAULT", "ok": True, "detail": "ok", "ms": 12},
+        {"name": "probe bus 0 (default session)", "ok": True, "detail": "EPS responded", "ms": 12},
         {"name": "session EXTENDED", "ok": True, "detail": "ok", "ms": 9},
         {"name": "session PROGRAMMING", "ok": True, "detail": "ok", "ms": 11},
         {"name": "session PROGRAMMING (repeat)", "ok": True, "detail": "ok", "ms": 8},
@@ -615,6 +617,7 @@ def _run_diag_job() -> None:
       diag_state.update(
         status=result.get("status", "failed"),
         panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1),
         identity=result.get("identity", []),
         steps=result.get("steps", []),
         step_count=len(result.get("steps", [])),
@@ -640,9 +643,9 @@ def start_diag_job() -> bool:
   if not panda_lock.acquire(blocking=False):
     return False
   with diag_lock:
-    diag_state.update(status="running", step_count=0, last="", panda="", identity=[],
-                      steps=[], failed_at="", exception="", traceback="", frames=0,
-                      bytes=0, message="")
+    diag_state.update(status="running", step_count=0, last="", panda="", eps_bus=-1,
+                      identity=[], steps=[], failed_at="", exception="", traceback="",
+                      frames=0, bytes=0, message="")
   try:
     threading.Thread(target=_run_diag_job, name="tsk_dataflash_diag", daemon=True).start()
   except Exception:
