@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>READY Capture</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .page {
+        width: min(100vw, 460px);
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 100vh;
+      }
+
+      .back-bar { padding: 12px 20px; }
+
+      .back-link {
+        color: #007aff;
+        font-size: 17px;
+        text-decoration: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .back-link::before { content: "‹ "; }
+
+      .page-header { padding: 0 20px 12px; }
+      .page-title { font-size: 26px; font-weight: 700; }
+
+      .warn-card {
+        margin: 0 16px 12px;
+        background: #fff;
+        border-radius: 12px;
+        padding: 14px 16px;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+
+      .warn-card b { color: #c93400; }
+
+      .run-btn {
+        display: block;
+        width: calc(100% - 32px);
+        margin: 0 16px 12px;
+        padding: 14px;
+        border: none;
+        border-radius: 12px;
+        background: #007aff;
+        color: #fff;
+        font: inherit;
+        font-size: 17px;
+        font-weight: 600;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .run-btn:disabled { background: #c7c7cc; }
+
+      .terminal {
+        margin: 0 16px 16px;
+        background: #1c1c1e;
+        border-radius: 12px;
+        padding: 16px;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        color: #e5e5ea;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .terminal .err { color: #ff453a; }
+      .terminal .ok { color: #30d158; }
+      .terminal .warn { color: #ff9f0a; }
+      .terminal .dim { color: #8e8e93; }
+      .terminal .big { font-size: 14px; font-weight: 700; }
+
+      .copy-area {
+        margin: 0 16px 16px;
+        width: calc(100% - 32px);
+        height: 160px;
+        display: none;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 11px;
+        padding: 10px;
+        border-radius: 12px;
+        border: 1px solid #c6c6c8;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="back-bar">
+        <a class="back-link" href="/">TSK Manager</a>
+      </div>
+      <header class="page-header">
+        <div class="page-title">READY Capture</div>
+      </header>
+
+      <div class="warn-card" id="warnCard">
+        Run this with the car in <b>READY</b> (hybrid system started, foot on the brake,
+        in Park). Run the <b>UDS Sweep</b> in Not Ready to Drive first — this pass re-tests
+        what that one found, so it is much more useful second.<br><br>
+        It records every CAN frame with its full payload for 90 seconds, then re-asks only
+        requests the first sweep already characterised. No unknown bytes are sent while the
+        car is drivable. About 5 minutes total.
+      </div>
+
+      <button class="run-btn" id="runBtn" type="button">Start the READY capture</button>
+      <div class="terminal" id="terminal"></div>
+      <textarea class="copy-area" id="copyArea" readonly></textarea>
+    </main>
+
+    <script>
+      const terminal = document.getElementById("terminal");
+      const runBtn = document.getElementById("runBtn");
+      const copyArea = document.getElementById("copyArea");
+
+      function termWrite(text, className) {
+        const span = document.createElement("span");
+        if (className) span.className = className;
+        span.textContent = text + "\n";
+        terminal.appendChild(span);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+
+      function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+      async function getStatus() {
+        const r = await fetch("/api/ready-capture-status", { cache: "no-store" });
+        return r.json();
+      }
+
+      function render(s) {
+        const cap = s.capture || {};
+        termWrite("");
+        termWrite("READY capture", "ok");
+        termWrite("Panda: " + (s.panda || "?"));
+        termWrite("EPS bus: " + (s.eps_bus === -1 ? "no diagnostic response" : s.eps_bus),
+                  s.eps_bus === -1 ? "err" : "warn");
+        termWrite("Frames captured: " + (s.frames || 0) + " across " + (cap.ids || 0) + " IDs");
+
+        termWrite("");
+        termWrite("SecOC-signed candidates (changing MAC tail, stable head)",
+                  (cap.candidates || []).length ? "ok" : "warn");
+        if ((cap.candidates || []).length) {
+          for (const c of cap.candidates) {
+            termWrite("  bus " + c.bus + "  " + c.addr + "  samples " + c.samples +
+                      "  tail " + c.tail_distinct + "  head " + c.head_distinct, "ok");
+          }
+        } else {
+          termWrite("  none found — the EPS may not be signing, or the window was too short");
+        }
+
+        termWrite("");
+        termWrite("Sync frames (0x0F)", (cap.sync || []).length ? "ok" : "warn");
+        for (const y of (cap.sync || [])) {
+          termWrite("  bus " + y.bus + "  " + y.addr + "  samples " + y.samples +
+                    "  distinct " + y.distinct);
+        }
+        if (!(cap.sync || []).length) termWrite("  none seen");
+
+        if ((s.diff || []).length) {
+          termWrite("");
+          termWrite("Mode diff — silent in Not Ready to Drive, re-asked here", "dim");
+          for (const d of s.diff) {
+            const changed = d.outcome !== "silent";
+            termWrite("  " + d.label + ": " + d.outcome +
+                      (d.nrc >= 0 ? " NRC 0x" + d.nrc.toString(16) : ""),
+                      changed ? "ok" : "warn");
+          }
+        }
+
+        if ((s.responders || []).length) {
+          termWrite("");
+          termWrite("Responders on the bus (" + s.responders.length + ")", "ok");
+          termWrite("  " + s.responders.join(" "));
+        }
+        if ((s.cross || []).length) {
+          termWrite("");
+          termWrite("Silent services against other ECUs", "dim");
+          for (const c of s.cross) {
+            termWrite("  " + c.addr + " " + c.label + ": " + c.outcome,
+                      c.outcome === "silent" ? "warn" : "ok");
+          }
+        }
+        if ((s.seeds || []).length) {
+          termWrite("");
+          termWrite("Security seed in READY", "dim");
+          for (const sd of s.seeds) {
+            termWrite("  level " + sd.level + ": " + sd.outcome +
+                      (sd.raw ? " " + sd.raw : ""), sd.outcome === "positive" ? "ok" : "warn");
+          }
+        }
+
+        termWrite("");
+        if (s.message) termWrite(s.message, s.status === "captured" ? "ok" : "warn");
+        termWrite("");
+        termWrite("Tap below to copy this as text instead of screenshotting.", "dim");
+        copyArea.value = terminal.textContent;
+        copyArea.style.display = "block";
+        copyArea.addEventListener("click", () => copyArea.select());
+      }
+
+      async function run() {
+        runBtn.disabled = true;
+        runBtn.textContent = "Running…";
+        document.getElementById("warnCard").style.display = "none";
+
+        let s = null;
+        try { s = await getStatus(); } catch (err) { /* fall through */ }
+
+        if (s && s.status === "running") {
+          termWrite("A capture is already in progress — attaching...");
+        } else {
+          try {
+            const r = await fetch("/api/ready-capture", { method: "POST", cache: "no-store" });
+            const started = await r.json();
+            if (!started.ok && started.status !== "running") {
+              termWrite(started.message || "Could not start the capture.", "err");
+              runBtn.disabled = false;
+              runBtn.textContent = "Start the READY capture";
+              return;
+            }
+          } catch (err) {
+            termWrite(String(err), "err");
+            runBtn.disabled = false;
+            return;
+          }
+        }
+
+        termWrite("Capturing. About 5 minutes — leave the screen on.");
+        let last = -1;
+        while (true) {
+          await sleep(1000);
+          try { s = await getStatus(); } catch (err) { continue; }
+          if (s.status === "running") {
+            if ((s.count || 0) !== last) {
+              last = s.count || 0;
+              termWrite("  " + (s.stage || "") + "  " + (s.last || ""));
+            }
+            continue;
+          }
+          if (s.status === "failed") {
+            termWrite("");
+            termWrite(s.message || "Capture failed.", "err");
+            break;
+          }
+          render(s);
+          break;
+        }
+        runBtn.disabled = false;
+        runBtn.textContent = "Run again";
+      }
+
+      runBtn.addEventListener("click", run);
+    </script>
+  </body>
+</html>

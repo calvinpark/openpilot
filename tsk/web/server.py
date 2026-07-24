@@ -28,6 +28,8 @@ from tsk.lib.reset_probe import probe_reset_window
 from tsk.lib.level3_probe import probe_level3
 from tsk.lib.sendkey_probe import send_willem_key
 from tsk.lib.preamble_probe import probe_preamble
+from tsk.lib.sweep_uds import sweep
+from tsk.lib.capture_ready import capture_ready
 
 
 HOST = "0.0.0.0"
@@ -397,6 +399,44 @@ preamble_state = {
   "dtc": {},
   "reads": [],
   "liveness": "",
+  "message": "",
+}
+
+# Exhaustive UDS sweep (Not Ready to Drive) — every service byte, every sub-function,
+# deadline-bounded and resumable across runs.
+sweep_lock = threading.Lock()
+sweep_state = {
+  "status": "idle",   # idle | running | complete | partial | unreachable | failed
+  "count": 0,
+  "last": "",
+  "stage": "",
+  "panda": "",
+  "eps_bus": -1,
+  "timeout_ms": 0,
+  "stages": [],
+  "answering": [],
+  "silent": [],
+  "responders": [],
+  "records": 0,
+  "frontier": "",
+  "message": "",
+}
+
+# READY pass — full-payload capture + the mode diff driven by the sweep's work-list.
+ready_lock = threading.Lock()
+ready_state = {
+  "status": "idle",   # idle | running | captured | no_sweep | unreachable | failed
+  "count": 0,
+  "last": "",
+  "stage": "",
+  "panda": "",
+  "eps_bus": -1,
+  "capture": {},
+  "diff": [],
+  "responders": [],
+  "cross": [],
+  "seeds": [],
+  "frames": 0,
   "message": "",
 }
 
@@ -1340,6 +1380,177 @@ def start_preamble_job() -> bool:
   return True
 
 
+def _sweep_progress(steps=None, last=None, stage=None) -> None:
+  with sweep_lock:
+    if steps is not None:
+      sweep_state["count"] = steps
+    if last is not None:
+      sweep_state["last"] = last
+    if stage is not None:
+      sweep_state["stage"] = stage
+
+
+def _run_sweep_mock() -> None:
+  # Laptop dry run: the partial shape — the budget runs out mid sub-function sweep, which
+  # is the expected first-session outcome in the car.
+  for i, (stage, last) in enumerate((
+      ("calibrate", "calibrated"), ("services", "services default"),
+      ("services", "services extended"), ("subfunctions", "sub-functions of 0x10"),
+      ("subfunctions", "sub-functions of 0x22"), ("dids", "DIDs identity"),
+      ("addresses", "address sweep"), ("cross", "cross-ECU silent set")), 1):
+    time.sleep(0.25)
+    _sweep_progress(steps=i * 64, last=last, stage=stage)
+  with sweep_lock:
+    sweep_state.update(
+      status="partial", count=812, last="sub-functions of 0x27", stage="subfunctions",
+      panda="1.7.0-mock", eps_bus=1, timeout_ms=120, records=812,
+      stages=[
+        {"name": "calibrate", "detail": "round trip 12 ms → timeout 120 ms"},
+        {"name": "services/default", "detail": "256 sent"},
+        {"name": "services/extended", "detail": "256 sent"},
+        {"name": "subfunctions/10", "detail": "256 sent"},
+        {"name": "dids/identity", "detail": "44 sent"},
+        {"name": "addresses", "detail": "3 responder(s)"},
+      ],
+      answering=["0x10", "0x14", "0x19", "0x22", "0x23", "0x27", "0x2e", "0x31", "0x3e"],
+      silent=["0x28", "0x34", "0x36", "0x37", "0x85"],
+      responders=["0x7a1", "0x7b0", "0x7e0"],
+      frontier="subfunctions: stopped at 0x27 sub 0x40",
+      message="Budget reached — 812 results saved. subfunctions: stopped at 0x27 sub 0x40. "
+              "Run this page again (Not Ready to Drive) and it resumes where it stopped. "
+              "Screenshot and send to Calvin. (mock)",
+    )
+
+
+def _run_sweep_job() -> None:
+  try:
+    result = sweep(progress_cb=_sweep_progress)
+    with sweep_lock:
+      sweep_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), timeout_ms=result.get("timeout_ms", 0),
+        stages=result.get("stages", []), answering=result.get("answering", []),
+        silent=result.get("silent", []), responders=result.get("responders", []),
+        records=result.get("records", 0), frontier=result.get("frontier", ""),
+        message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_sweep_mock()
+  except Exception as e:
+    with sweep_lock:
+      sweep_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_sweep_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with sweep_lock:
+    sweep_state.update(status="running", count=0, last="", stage="", panda="", eps_bus=-1,
+                       timeout_ms=0, stages=[], answering=[], silent=[], responders=[],
+                       records=0, frontier="", message="")
+  try:
+    threading.Thread(target=_run_sweep_job, name="tsk_uds_sweep", daemon=True).start()
+  except Exception:
+    with sweep_lock:
+      sweep_state.update(status="failed", message="Could not start the UDS sweep.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def _ready_progress(steps=None, last=None, stage=None) -> None:
+  with ready_lock:
+    if steps is not None:
+      ready_state["count"] = steps
+    if last is not None:
+      ready_state["last"] = last
+    if stage is not None:
+      ready_state["stage"] = stage
+
+
+def _run_ready_mock() -> None:
+  for i, (stage, last) in enumerate((
+      ("capture", "capturing 30s / 90s"), ("capture", "capturing 90s / 90s"),
+      ("capture", "capture analysed"), ("diff", "reflash set: programming session"),
+      ("addresses", "address sweep")), 1):
+    time.sleep(0.3)
+    _ready_progress(steps=i * 900, last=last, stage=stage)
+  with ready_lock:
+    ready_state.update(
+      status="captured", count=4500, last="address sweep", stage="addresses",
+      panda="1.7.0-mock", eps_bus=1, frames=41208,
+      capture={
+        "ids": 147, "frames": 41208,
+        "candidates": [
+          {"bus": 1, "addr": "0x1c4", "samples": 1780, "tail_distinct": 0.998, "head_distinct": 0.061},
+          {"bus": 1, "addr": "0x260", "samples": 1774, "tail_distinct": 0.996, "head_distinct": 0.044},
+          {"bus": 1, "addr": "0x2a1", "samples": 890, "tail_distinct": 0.991, "head_distinct": 0.112},
+        ],
+        "sync": [{"bus": 1, "addr": "0x00f", "samples": 88, "distinct": 88}],
+      },
+      diff=[
+        {"label": "reflash set: programming session", "request": "1002", "outcome": "silent", "nrc": -1, "raw": ""},
+        {"label": "reflash set: communication control", "request": "28", "outcome": "silent", "nrc": -1, "raw": ""},
+        {"label": "reflash set: request download", "request": "34", "outcome": "silent", "nrc": -1, "raw": ""},
+        {"label": "reflash set: control DTC setting", "request": "85", "outcome": "silent", "nrc": -1, "raw": ""},
+      ],
+      responders=["0x7a1", "0x7b0", "0x7c0", "0x7e0"],
+      cross=[
+        {"addr": "0x7b0", "label": "control DTC setting", "outcome": "nrc", "nrc": 0x7f},
+        {"addr": "0x7e0", "label": "control DTC setting", "outcome": "positive", "nrc": -1},
+      ],
+      seeds=[
+        {"level": "0x01", "outcome": "nrc", "nrc": 0x7e, "raw": "7f277e"},
+        {"level": "0x03", "outcome": "positive", "nrc": -1, "raw": "2703aabbccdd"},
+      ],
+      message="Captured 41208 frames across 147 IDs; 3 look SecOC-signed. Mode diff: 0 of 4 "
+              "answered in READY that did not in Not Ready to Drive. 4 responder(s) on the "
+              "bus. Screenshot and send to Calvin — the capture file is saved on the device "
+              "for offline analysis. (mock)",
+    )
+
+
+def _run_ready_job() -> None:
+  try:
+    result = capture_ready(progress_cb=_ready_progress)
+    with ready_lock:
+      ready_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), capture=result.get("capture", {}),
+        diff=result.get("diff", []), responders=result.get("responders", []),
+        cross=result.get("cross", []), seeds=result.get("seeds", []),
+        frames=result.get("frames", 0), message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_ready_mock()
+  except Exception as e:
+    with ready_lock:
+      ready_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_ready_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with ready_lock:
+    ready_state.update(status="running", count=0, last="", stage="", panda="", eps_bus=-1,
+                       capture={}, diff=[], responders=[], cross=[], seeds=[], frames=0,
+                       message="")
+  try:
+    threading.Thread(target=_run_ready_job, name="tsk_ready_capture", daemon=True).start()
+  except Exception:
+    with ready_lock:
+      ready_state.update(status="failed", message="Could not start the READY capture.")
+    panda_lock.release()
+    return False
+  return True
+
+
 class TSKWebHandler(BaseHTTPRequestHandler):
   server_version = "TSKWeb/0.1"
 
@@ -1617,6 +1828,28 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/uds-sweep":
+      if not start_sweep_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
+    if path == "/api/ready-capture":
+      if not start_ready_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
     if path == "/api/preamble-probe":
       if not start_preamble_job():
         self._send_json({
@@ -1742,6 +1975,18 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/preamble-status":
       with preamble_lock:
         payload = dict(preamble_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/uds-sweep-status":
+      with sweep_lock:
+        payload = dict(sweep_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/ready-capture-status":
+      with ready_lock:
+        payload = dict(ready_state)
       self._send_json(payload, send_body=send_body)
       return
 

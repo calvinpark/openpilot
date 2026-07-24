@@ -353,7 +353,7 @@
 
       <div class="section-label">Not Ready To Drive</div>
       <div class="group">
-        <a class="group-item action" href="/preamble-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Programming preamble <span class="chevron">›</span></a>
+        <a class="group-item action" href="/uds-sweep.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;"><b>1. UDS Sweep (5 min)</b> <span class="chevron">›</span></a>
       </div>
 
       <!-- Superseded by the preamble probe, which folds in the identity read, the service
@@ -363,6 +363,7 @@
            sendkey is retired outright — it is spent, and re-running it spends another
            counted security attempt at a level Willem's secret does not belong to. -->
       <div class="group span-hidden">
+        <a class="group-item action" href="/preamble-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Programming preamble <span class="chevron">›</span></a>
         <a class="group-item action" href="/read-mem.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Read key region (0x23) <span class="chevron">›</span></a>
         <a class="group-item action" href="/ident-map.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">EPS identity &amp; service map <span class="chevron">›</span></a>
         <a class="group-item action" href="/prog-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Programming &amp; security probe <span class="chevron">›</span></a>
@@ -372,11 +373,14 @@
         <a class="group-item action" href="/reset-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Reset-window probe <span class="chevron">›</span></a>
       </div>
 
-      <!-- Nothing to run in READY for this build. The sniff already produced its counts
-           (bus 1: 147 IDs + sync 0x0F in READY, 2 IDs in NRtD) and it cannot do the open
-           signed-ID capture — sniff_can records frame counts and arb IDs, never payloads.
-           Hidden, not deleted; the page is still served at /can-sniff.html. -->
-      <div class="section-label span-hidden">READY</div>
+      <div class="section-label">READY</div>
+      <div class="group">
+        <a class="group-item action" href="/ready-capture.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;"><b>2. READY Capture (5 min)</b> <span class="chevron">›</span></a>
+      </div>
+
+      <!-- sniff_can records frame counts and arb IDs but never payloads, so it cannot do
+           the signed-ID capture — ready-capture.html supersedes it. Hidden, not deleted;
+           still served at /can-sniff.html. -->
       <div class="group span-hidden">
         <a class="group-item action" href="/can-sniff.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Sniff CAN messages <span class="chevron">›</span></a>
       </div>
