@@ -25,8 +25,13 @@ pass reads. Two jobs:
    reprogramming set is silent in both modes, drivability is eliminated as a variable.
 
    The address sweep repeats here for the same reason: far more modules are awake in
-   READY, so "who else is on this bus, and do they go silent on the same services" — the
-   test that decides whether a repin could bypass a filter — gets a much better answer.
+   READY, so "who else is on this bus, and do they go silent on the same services" gets a
+   better answer. The 2026-07-25 Not Ready to Drive run found 13 responders, of which only
+   0x7f1 answers the four silent services — which does not by itself distinguish per-ECU
+   behaviour from a per-destination gateway policy, since a gateway filters by destination
+   and would answer for itself. The capture in this same pass is what settles it: a module
+   that answers diagnostics but never transmits periodic frames on our segment is being
+   proxied, and a repin would then bypass the filter. See COROLLA_INVESTIGATION.md 9.9.
 
 READY means the car is drivable, so this pass sends only requests the first sweep already
 characterised, never unknown bytes. Unknown bytes belong in Not Ready to Drive, where a

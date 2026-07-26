@@ -77,7 +77,16 @@ DID_BLOCKS = [(0xF100, 0xF1FF, "identity"), (0x0200, 0x02FF, "willem"),
 
 # Known silent on this EPS — re-tested against every other responder found on the bus,
 # which is the gateway-vs-EPS discriminator: another module going silent on the same
-# services means something on the path is filtering, and a repin could bypass it.
+# services would mean something on the path is filtering, and a repin could bypass it.
+# RUN in-car 2026-07-25: of 13 responders on bus 1, twelve go silent on all four and
+# 0x7f1 returns a proper NRC to all four. That does NOT settle it either way. If all
+# thirteen sit on the panda's physical segment, no filtering is possible and the drop is
+# per-ECU; but a routing gateway filters BY DESTINATION, so a "no reflash to the EPS"
+# policy answering for itself at 0x7f1 produces exactly the same pattern. Which of those
+# is true depends on whether those addresses are on our wire or proxied, and that is
+# unverified. The discriminator is a READY background-traffic capture: a module that
+# answers diagnostics but never transmits periodic frames on our segment is proxied.
+# See tsk/COROLLA_INVESTIGATION.md section 9.9.
 SILENT_SET = [(b"\x10\x02", "programming session"), (b"\x28", "communication control"),
               (b"\x34", "request download"), (b"\x85", "control DTC setting")]
 
