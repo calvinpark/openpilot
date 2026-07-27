@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Range Dump</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .page {
+        width: min(100vw, 460px);
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 100vh;
+      }
+
+      .back-bar {
+        padding: 12px 20px;
+      }
+
+      .back-link {
+        color: #007aff;
+        font-size: 17px;
+        text-decoration: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .back-link::before {
+        content: "‹ ";
+      }
+
+      .page-header {
+        padding: 0 20px 12px;
+      }
+
+      .page-title {
+        font-size: 28px;
+        font-weight: 700;
+      }
+
+      .page-sub {
+        font-size: 13px;
+        color: #8e8e93;
+        margin-top: 4px;
+      }
+
+      .terminal {
+        margin: 0 16px 16px;
+        background: #1c1c1e;
+        border-radius: 12px;
+        padding: 16px;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #e5e5ea;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .terminal .err { color: #ff453a; }
+      .terminal .ok { color: #30d158; }
+      .terminal .warn { color: #ff9f0a; }
+      .terminal .dim { color: #8e8e93; }
+
+      .start-btn {
+        margin: 0 16px 16px;
+        padding: 14px;
+        border: none;
+        border-radius: 12px;
+        background: #007aff;
+        color: #fff;
+        font-size: 17px;
+        font-weight: 600;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .start-btn:disabled {
+        background: #c7c7cc;
+        color: #8e8e93;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="back-bar">
+        <a class="back-link" href="/">TSK Manager</a>
+      </div>
+      <header class="page-header">
+        <div class="page-title" id="title">Range Dump</div>
+        <div class="page-sub" id="subtitle"></div>
+      </header>
+      <div class="terminal" id="terminal"></div>
+      <button class="start-btn" id="startBtn" type="button">Start dump</button>
+    </main>
+
+    <script>
+      // Tap-to-run rather than auto-run: these ranges are unproven and each attempt
+      // costs a Not Ready To Drive session, so arriving on the page must not fire one.
+      const profile = new URLSearchParams(location.search).get("profile") || "";
+      const terminal = document.getElementById("terminal");
+      const startBtn = document.getElementById("startBtn");
+      const titleEl = document.getElementById("title");
+      const subEl = document.getElementById("subtitle");
+
+      function termWrite(text, className) {
+        const span = document.createElement("span");
+        if (className) span.className = className;
+        span.textContent = text + "\n";
+        terminal.appendChild(span);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+
+      function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+      }
+
+      function hex32(n) {
+        return "0x" + (n >>> 0).toString(16).padStart(8, "0").toUpperCase();
+      }
+
+      async function getStatus() {
+        const response = await fetch(
+          "/api/range-status?profile=" + encodeURIComponent(profile), { cache: "no-store" });
+        return response.json();
+      }
+
+      function progressBar(bytes, total) {
+        const pct = total ? Math.round(bytes / total * 100) : 0;
+        const filled = Math.max(0, Math.min(20, Math.round(pct / 5)));
+        const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+        return `  [${bar}] ${bytes}/${total}`;
+      }
+
+      function writeOutcome(s) {
+        termWrite("");
+        if (s.status === "complete") {
+          termWrite(s.message || "Dump complete.", "ok");
+        } else if (s.status === "partial") {
+          termWrite(s.message || "Partial dump saved.", "warn");
+        } else if (s.status === "empty") {
+          termWrite(s.message || "No frames received.", "err");
+        } else {
+          termWrite(s.message || "Dump failed.", "err");
+        }
+        if (s.dumps && s.dumps.length) {
+          termWrite("");
+          termWrite("On disk:", "dim");
+          for (const d of s.dumps) {
+            termWrite(`  ${d.name}  ${d.bytes} bytes`, "dim");
+          }
+        }
+      }
+
+      async function runDump() {
+        startBtn.disabled = true;
+        startBtn.textContent = "Dumping…";
+
+        let s = null;
+        try {
+          s = await getStatus();
+        } catch (err) { /* server not reachable yet, fall through to start */ }
+
+        if (s && s.status === "running") {
+          termWrite("A dump is already in progress — attaching...");
+        } else {
+          termWrite("Starting dump.");
+          termWrite("The car will freak out - don't worry.", "warn");
+          try {
+            const response = await fetch("/api/range-dump", {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ profile: profile }),
+            });
+            const started = await response.json();
+            if (!started.ok && started.status !== "running") {
+              termWrite(started.message || "Could not start dump.", "err");
+              startBtn.disabled = false;
+              startBtn.textContent = "Start dump";
+              return;
+            }
+          } catch (err) {
+            termWrite(String(err), "err");
+            startBtn.disabled = false;
+            startBtn.textContent = "Start dump";
+            return;
+          }
+        }
+
+        let lastBytes = -1;
+        while (true) {
+          await sleep(500);
+          try {
+            s = await getStatus();
+          } catch (err) {
+            continue;  // transient poll failure, keep waiting
+          }
+          if (s.status === "running") {
+            if (s.bytes !== lastBytes) {
+              lastBytes = s.bytes;
+              termWrite(progressBar(s.bytes, s.total || 0));
+            }
+            continue;
+          }
+          writeOutcome(s);
+          break;
+        }
+
+        startBtn.disabled = false;
+        startBtn.textContent = "Dump again";
+      }
+
+      async function init() {
+        if (!profile) {
+          termWrite("No profile given in the URL.", "err");
+          startBtn.disabled = true;
+          return;
+        }
+        let s;
+        try {
+          s = await getStatus();
+        } catch (err) {
+          termWrite(String(err), "err");
+          return;
+        }
+        if (!s || !s.profile) {
+          termWrite(`Unknown profile: ${profile}`, "err");
+          startBtn.disabled = true;
+          return;
+        }
+        titleEl.textContent = s.label;
+        subEl.textContent = `${hex32(s.start)}-${hex32(s.end)}   ${s.total} bytes   ${Math.floor(s.total / 4)} frames`;
+        document.title = s.label + " Dump";
+
+        termWrite("Not Ready To Drive mode. Keep the comma powered.", "dim");
+        termWrite("Cap: 5 minutes per run. Unproven payload.", "dim");
+        if (s.dumps && s.dumps.length) {
+          termWrite("");
+          termWrite("On disk:", "dim");
+          for (const d of s.dumps) {
+            termWrite(`  ${d.name}  ${d.bytes} bytes`, "dim");
+          }
+        }
+        if (s.status === "running") {
+          runDump();
+        }
+      }
+
+      startBtn.addEventListener("click", runDump);
+      init();
+    </script>
+  </body>
+</html>

@@ -21,6 +21,11 @@ DATAFLASH_DIR = f"{CACHE_DIR}/tsk/dataflash"
 CAN_MESSAGES_DIR = f"{CACHE_DIR}/tsk/can-messages"
 CAN_ORACLE_PATH = f"{CAN_MESSAGES_DIR}/can_oracle.ndjson"
 
+# Exploratory range dumps (dump_range.py). Kept out of DATAFLASH_DIR so the matcher,
+# which looks for one exact filename there, can never pick one up. Timestamped
+# filenames, so repeated runs of the same profile accumulate instead of overwriting.
+RANGE_DUMP_DIR = f"{CACHE_DIR}/tsk/range-dumps"
+
 RECOMMENDED_OP_USER = "commaai"
 RECOMMENDED_OP_BRANCH = "nightly-dev"
 RECOMMENDED_OP_DIR = f"{COMMA_DATA_DIR}/tsk-recommended"

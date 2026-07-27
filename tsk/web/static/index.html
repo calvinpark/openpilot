@@ -347,6 +347,50 @@
         <button class="group-item disabled" type="button" id="matcherBtn" disabled>Find Toyota Security Key (need CAN &amp; DataFlash)</button>
       </div>
 
+      <div class="section-label">Range dumps (experimental)</div>
+      <div class="group">
+        <a class="prereq-row" href="/range-collector.html?profile=codeflash" id="rangeRow-codeflash">
+          <div class="prereq-dot" id="rangeDot-codeflash"></div>
+          <div class="prereq-body">
+            <div class="prereq-title">Code flash</div>
+            <div class="prereq-detail" id="rangeDetail-codeflash">0x00000000-0x00100000</div>
+          </div>
+          <div class="prereq-chevron">›</div>
+        </a>
+        <a class="prereq-row" href="/range-collector.html?profile=above_codeflash" id="rangeRow-above_codeflash">
+          <div class="prereq-dot" id="rangeDot-above_codeflash"></div>
+          <div class="prereq-body">
+            <div class="prereq-title">Above code flash</div>
+            <div class="prereq-detail" id="rangeDetail-above_codeflash">0x00100000-0x00200000</div>
+          </div>
+          <div class="prereq-chevron">›</div>
+        </a>
+        <a class="prereq-row" href="/range-collector.html?profile=ram" id="rangeRow-ram">
+          <div class="prereq-dot" id="rangeDot-ram"></div>
+          <div class="prereq-body">
+            <div class="prereq-title">RAM</div>
+            <div class="prereq-detail" id="rangeDetail-ram">0xFEBC0000-0xFEC20000</div>
+          </div>
+          <div class="prereq-chevron">›</div>
+        </a>
+        <a class="prereq-row" href="/range-collector.html?profile=dataflash" id="rangeRow-dataflash">
+          <div class="prereq-dot" id="rangeDot-dataflash"></div>
+          <div class="prereq-body">
+            <div class="prereq-title">DataFlash 64K</div>
+            <div class="prereq-detail" id="rangeDetail-dataflash">0xFF200000-0xFF210000</div>
+          </div>
+          <div class="prereq-chevron">›</div>
+        </a>
+        <a class="prereq-row" href="/range-collector.html?profile=dataflash_wide" id="rangeRow-dataflash_wide">
+          <div class="prereq-dot" id="rangeDot-dataflash_wide"></div>
+          <div class="prereq-body">
+            <div class="prereq-title">DataFlash wide</div>
+            <div class="prereq-detail" id="rangeDetail-dataflash_wide">0xFF200000-0xFF238000</div>
+          </div>
+          <div class="prereq-chevron">›</div>
+        </a>
+      </div>
+
       <div class="section-label">Manage</div>
       <div class="group">
         <button class="group-item disabled" type="button" id="cleanerBtn" disabled>Clear extraction cache</button>
@@ -665,10 +709,45 @@
         } catch (err) { /* polling failure */ }
       }
 
+      // --- Range dumps ---
+
+      // Green once at least one dump for that profile is on disk, gray otherwise;
+      // the detail line falls back to the static range text when there is nothing
+      // to report, so a row never goes blank.
+      async function loadRangeStatus() {
+        try {
+          const payload = await fetchJson("/api/range-status");
+          for (const p of payload.profiles || []) {
+            const dot = document.getElementById("rangeDot-" + p.profile);
+            const detail = document.getElementById("rangeDetail-" + p.profile);
+            if (!dot || !detail) continue;
+            const range = `0x${(p.start >>> 0).toString(16).padStart(8, "0").toUpperCase()}-0x${(p.end >>> 0).toString(16).padStart(8, "0").toUpperCase()}`;
+            if (p.status === "running") {
+              dot.className = "prereq-dot";
+              detail.style.color = "#8e8e93";
+              detail.textContent = `Dumping ${p.bytes} / ${p.total}`;
+            } else if (p.status === "failed" || p.status === "empty") {
+              dot.className = "prereq-dot";
+              detail.style.color = "#ff3b30";
+              detail.textContent = p.status === "empty" ? "No frames received" : "Dump failed";
+            } else if (p.dumps && p.dumps.length) {
+              dot.className = "prereq-dot ready";
+              detail.style.color = "";
+              detail.textContent = `${range}   ${p.dumps.length} on disk`;
+            } else {
+              dot.className = "prereq-dot";
+              detail.style.color = "";
+              detail.textContent = range;
+            }
+          }
+        } catch (err) { /* polling failure */ }
+      }
+
       async function refreshState() {
         await Promise.all([
           loadStatus(),
           loadExtractionStatus(),
+          loadRangeStatus(),
           loadRebootActions(),
         ]);
       }

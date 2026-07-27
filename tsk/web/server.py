@@ -10,10 +10,11 @@ import time
 import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from tsk.lib.collect_can import collect as collect_can, count_oracle_frames, oracle_path as can_oracle_path, PROTECTED_TARGET, SYNC_TARGET
 from tsk.lib.dump_dataflash import DUMP_TOTAL, dump as dump_dataflash, dump_path
+from tsk.lib.dump_range import dump as dump_range, list_dumps as list_range_dumps, profile_for, PROFILE_KEYS, PROFILES
 from tsk.lib.env import is_agnos, setup
 from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
 from tsk.lib.key_file_manager import KeyFileManager, format_key
@@ -303,6 +304,121 @@ def _run_dataflash_job() -> None:
   finally:
     TSKExtractor._close_panda()
     panda_lock.release()
+
+
+# Exploratory range dumps. One state dict per profile under a single lock; each is
+# the same shape as df_state so the collector page can poll them identically.
+# Serialized against extract/dump/collect by the same panda_lock.
+range_lock = threading.Lock()
+range_state = {
+  key: {
+    "profile": key,
+    "label": PROFILES[key].label,
+    "start": PROFILES[key].start,
+    "end": PROFILES[key].end,
+    "ready": False,
+    "status": "idle",   # idle | running | complete | partial | empty | failed
+    "frames": 0,
+    "bytes": 0,
+    "total": PROFILES[key].total,
+    "message": "",
+    "dumps": [],
+  }
+  for key in PROFILE_KEYS
+}
+
+
+def _range_progress_cb(key):
+  def _cb(status=None, frames=None, bytes_done=None, total=None, message=None) -> None:
+    with range_lock:
+      st = range_state[key]
+      if status is not None:
+        st["status"] = status
+      if frames is not None:
+        st["frames"] = frames
+      if bytes_done is not None:
+        st["bytes"] = bytes_done
+      if total is not None:
+        st["total"] = total
+      if message is not None:
+        st["message"] = message
+  return _cb
+
+
+def _run_range_mock(key) -> None:
+  # Laptop dry run: ramp to complete over a couple of seconds. The partial/empty
+  # paths only happen on a real device.
+  total = PROFILES[key].total
+  for done in (total // 8, total // 4, total // 2, total * 3 // 4, total):
+    time.sleep(0.4)
+    cb = _range_progress_cb(key)
+    cb(status="running", frames=done // 4, bytes_done=done, total=total)
+  with range_lock:
+    range_state[key].update(status="complete", frames=total // 4, bytes=total,
+                            total=total, ready=True,
+                            message=f"Dump complete: {total} bytes (mock).")
+
+
+def _run_range_job(key) -> None:
+  try:
+    result = dump_range(key, progress_cb=_range_progress_cb(key))
+    status = result.get("status", "failed")
+    with range_lock:
+      range_state[key].update(
+        status=status,
+        frames=result.get("frames", range_state[key]["frames"]),
+        bytes=result.get("bytes", range_state[key]["bytes"]),
+        total=result.get("total", PROFILES[key].total),
+        message=result.get("message", ""),
+        ready=status in ("complete", "partial"),
+      )
+  except NotAGNOSError:
+    _run_range_mock(key)
+  except Exception as e:
+    with range_lock:
+      range_state[key].update(status="failed", message=str(e), ready=False)
+  finally:
+    with range_lock:
+      range_state[key]["dumps"] = list_range_dumps(PROFILES[key])
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_range_job(key) -> bool:
+  # panda_lock is the gate, exactly as for the production dump: any running panda
+  # operation rejects a concurrent start here.
+  if key not in PROFILES:
+    return False
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with range_lock:
+    range_state[key].update(status="running", frames=0, bytes=0,
+                            total=PROFILES[key].total, message="", ready=False)
+  try:
+    threading.Thread(target=_run_range_job, args=(key,),
+                     name=f"tsk_range_dump_{key}", daemon=True).start()
+  except Exception:
+    # The job thread never took ownership, so release the lock and clear the state
+    # here — otherwise panda_lock would wedge every panda op until a restart.
+    with range_lock:
+      range_state[key].update(status="failed", message="Could not start the dump job.",
+                              ready=False)
+    panda_lock.release()
+    return False
+  return True
+
+
+def rehydrate_range_state() -> None:
+  # Persisted range dumps survive a server restart; surface them per profile so the
+  # page shows what is already on disk. Timestamped names accumulate, so this is a
+  # listing rather than a single-file check.
+  for key in PROFILE_KEYS:
+    dumps = list_range_dumps(PROFILES[key])
+    if not dumps:
+      continue
+    with range_lock:
+      range_state[key].update(dumps=dumps, ready=True,
+                              message=f"{len(dumps)} dump(s) on disk.")
 
 
 def start_dataflash_job() -> bool:
@@ -660,6 +776,28 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/range-dump":
+      try:
+        body = self._read_json_body()
+      except Exception:
+        body = {}
+      key = body.get("profile", "")
+      if key not in PROFILES:
+        self._send_json({
+          "ok": False,
+          "message": f"Unknown dump profile: {key}",
+        }, status=HTTPStatus.BAD_REQUEST)
+        return
+      if not start_range_job(key):
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A dump, CAN collection, or another panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running", "profile": key})
+      return
+
     if path == "/api/clear-cache":
       with can_lock:
         can_running = can_state["status"] == "running"
@@ -709,6 +847,17 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/dataflash-status":
       with df_lock:
         payload = dict(df_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/range-status":
+      key = parse_qs(urlparse(self.path).query).get("profile", [""])[0]
+      with range_lock:
+        if key in range_state:
+          payload = dict(range_state[key])
+        else:
+          # No profile given: the whole set, for the index rows.
+          payload = {"profiles": [dict(range_state[k]) for k in PROFILE_KEYS]}
       self._send_json(payload, send_body=send_body)
       return
 
@@ -772,6 +921,7 @@ def main() -> None:
   setup()
   rehydrate_dataflash_state()
   rehydrate_can_state()
+  rehydrate_range_state()
   update_offroad_alert()
   threading.Thread(target=offroad_alert_loop, name="tsk_offroad_alert", daemon=True).start()
 
