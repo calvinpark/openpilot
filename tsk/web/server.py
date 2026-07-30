@@ -322,10 +322,21 @@ range_state = {
     "bytes": 0,
     "total": PROFILES[key].total,
     "message": "",
+    "proven": PROFILES[key].proven,
     "dumps": [],
+    # Counted separately, never as len(dumps): a partial is a same-size file with
+    # zero-filled gaps, so folding it into one total inflates progress toward a
+    # target of N complete dumps by exactly the number of failed runs.
+    "complete_count": 0,
+    "partial_count": 0,
   }
   for key in PROFILE_KEYS
 }
+
+
+def _dump_counts(dumps):
+  complete = sum(1 for d in dumps if d.get("status") == "complete")
+  return complete, len(dumps) - complete
 
 
 def _range_progress_cb(key):
@@ -378,8 +389,11 @@ def _run_range_job(key) -> None:
     with range_lock:
       range_state[key].update(status="failed", message=str(e), ready=False)
   finally:
+    dumps = list_range_dumps(PROFILES[key])
+    complete, partial = _dump_counts(dumps)
     with range_lock:
-      range_state[key]["dumps"] = list_range_dumps(PROFILES[key])
+      range_state[key].update(dumps=dumps, complete_count=complete,
+                              partial_count=partial)
     TSKExtractor._close_panda()
     panda_lock.release()
 
@@ -416,9 +430,15 @@ def rehydrate_range_state() -> None:
     dumps = list_range_dumps(PROFILES[key])
     if not dumps:
       continue
+    complete, partial = _dump_counts(dumps)
+    # Complete and partial counted apart, so the restart message cannot overstate
+    # progress toward a target expressed in complete dumps.
+    summary = f"{complete} complete on disk."
+    if partial:
+      summary += f" {partial} partial (gapped, not usable as a full dump)."
     with range_lock:
-      range_state[key].update(dumps=dumps, ready=True,
-                              message=f"{len(dumps)} dump(s) on disk.")
+      range_state[key].update(dumps=dumps, ready=True, complete_count=complete,
+                              partial_count=partial, message=summary)
 
 
 def start_dataflash_job() -> bool:

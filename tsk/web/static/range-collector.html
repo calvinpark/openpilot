@@ -156,12 +156,23 @@
         } else {
           termWrite(s.message || "Dump failed.", "err");
         }
-        if (s.dumps && s.dumps.length) {
-          termWrite("");
-          termWrite("On disk:", "dim");
-          for (const d of s.dumps) {
-            termWrite(`  ${d.name}  ${d.bytes} bytes`, "dim");
-          }
+        writeOnDisk(s);
+      }
+
+      // Complete and partial listed under separate headings with their own counts, so
+      // a gapped run is never read as progress toward a target of N complete dumps.
+      function writeOnDisk(s) {
+        const dumps = s.dumps || [];
+        if (!dumps.length) return;
+        const complete = dumps.filter(d => d.status === "complete");
+        const partial = dumps.filter(d => d.status !== "complete");
+        termWrite("");
+        termWrite(`On disk: ${complete.length} complete, ${partial.length} partial`, "dim");
+        for (const d of complete) {
+          termWrite(`  ${d.name}  ${d.bytes} bytes`, "ok");
+        }
+        for (const d of partial) {
+          termWrite(`  ${d.name}  ${d.bytes} bytes (gapped)`, "warn");
         }
       }
 
@@ -247,14 +258,15 @@
         document.title = s.label + " Dump";
 
         termWrite("Not Ready To Drive mode. Keep the comma powered.", "dim");
-        termWrite("Cap: 5 minutes per run. Unproven payload.", "dim");
-        if (s.dumps && s.dumps.length) {
-          termWrite("");
-          termWrite("On disk:", "dim");
-          for (const d of s.dumps) {
-            termWrite(`  ${d.name}  ${d.bytes} bytes`, "dim");
-          }
+        termWrite("Cap: 25 minutes per run.", "dim");
+        // Taken from the profile, not printed as one blanket claim: dataflash has run
+        // on the car and returned a known answer, the other five have not.
+        if (s.proven) {
+          termWrite("This payload has run on the car and returned a known answer.", "ok");
+        } else {
+          termWrite("Unproven payload — a null result means unknown, not empty.", "warn");
         }
+        writeOnDisk(s);
         if (s.status === "running") {
           runDump();
         }

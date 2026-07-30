@@ -353,39 +353,47 @@
           <div class="prereq-dot" id="rangeDot-codeflash"></div>
           <div class="prereq-body">
             <div class="prereq-title">Code flash</div>
-            <div class="prereq-detail" id="rangeDetail-codeflash">0x00000000-0x00100000</div>
+            <div class="prereq-detail" id="rangeDetail-codeflash">0x00000000-0x00200000</div>
           </div>
           <div class="prereq-chevron">›</div>
         </a>
-        <a class="prereq-row" href="/range-collector.html?profile=above_codeflash" id="rangeRow-above_codeflash">
-          <div class="prereq-dot" id="rangeDot-above_codeflash"></div>
+        <a class="prereq-row" href="/range-collector.html?profile=extended_codeflash" id="rangeRow-extended_codeflash">
+          <div class="prereq-dot" id="rangeDot-extended_codeflash"></div>
           <div class="prereq-body">
-            <div class="prereq-title">Above code flash</div>
-            <div class="prereq-detail" id="rangeDetail-above_codeflash">0x00100000-0x00200000</div>
+            <div class="prereq-title">Code flash extended area</div>
+            <div class="prereq-detail" id="rangeDetail-extended_codeflash">0x01000000-0x0100C000</div>
           </div>
           <div class="prereq-chevron">›</div>
         </a>
-        <a class="prereq-row" href="/range-collector.html?profile=ram" id="rangeRow-ram">
-          <div class="prereq-dot" id="rangeDot-ram"></div>
+        <a class="prereq-row" href="/range-collector.html?profile=local_ram_pe1" id="rangeRow-local_ram_pe1">
+          <div class="prereq-dot" id="rangeDot-local_ram_pe1"></div>
           <div class="prereq-body">
-            <div class="prereq-title">RAM</div>
-            <div class="prereq-detail" id="rangeDetail-ram">0xFEBC0000-0xFEC20000</div>
+            <div class="prereq-title">Local RAM (PE1)</div>
+            <div class="prereq-detail" id="rangeDetail-local_ram_pe1">0xFEBE0000-0xFEC00000</div>
+          </div>
+          <div class="prereq-chevron">›</div>
+        </a>
+        <a class="prereq-row" href="/range-collector.html?profile=local_ram_self" id="rangeRow-local_ram_self">
+          <div class="prereq-dot" id="rangeDot-local_ram_self"></div>
+          <div class="prereq-body">
+            <div class="prereq-title">Local RAM (self)</div>
+            <div class="prereq-detail" id="rangeDetail-local_ram_self">0xFEDE0000-0xFEE00000</div>
+          </div>
+          <div class="prereq-chevron">›</div>
+        </a>
+        <a class="prereq-row" href="/range-collector.html?profile=global_ram" id="rangeRow-global_ram">
+          <div class="prereq-dot" id="rangeDot-global_ram"></div>
+          <div class="prereq-body">
+            <div class="prereq-title">Global RAM</div>
+            <div class="prereq-detail" id="rangeDetail-global_ram">0xFEEF8000-0xFEF08000</div>
           </div>
           <div class="prereq-chevron">›</div>
         </a>
         <a class="prereq-row" href="/range-collector.html?profile=dataflash" id="rangeRow-dataflash">
           <div class="prereq-dot" id="rangeDot-dataflash"></div>
           <div class="prereq-body">
-            <div class="prereq-title">DataFlash 64K</div>
+            <div class="prereq-title">DataFlash</div>
             <div class="prereq-detail" id="rangeDetail-dataflash">0xFF200000-0xFF210000</div>
-          </div>
-          <div class="prereq-chevron">›</div>
-        </a>
-        <a class="prereq-row" href="/range-collector.html?profile=dataflash_wide" id="rangeRow-dataflash_wide">
-          <div class="prereq-dot" id="rangeDot-dataflash_wide"></div>
-          <div class="prereq-body">
-            <div class="prereq-title">DataFlash wide</div>
-            <div class="prereq-detail" id="rangeDetail-dataflash_wide">0xFF200000-0xFF238000</div>
           </div>
           <div class="prereq-chevron">›</div>
         </a>
@@ -731,9 +739,16 @@
               detail.style.color = "#ff3b30";
               detail.textContent = p.status === "empty" ? "No frames received" : "Dump failed";
             } else if (p.dumps && p.dumps.length) {
-              dot.className = "prereq-dot ready";
+              // Complete and partial counted apart. A partial is the same size with
+              // zero-filled gaps, so one combined total would overstate progress
+              // toward a target of N complete dumps by the number of failed runs.
+              const complete = p.complete_count || 0;
+              const partial = p.partial_count || 0;
+              dot.className = complete ? "prereq-dot ready" : "prereq-dot warn";
               detail.style.color = "";
-              detail.textContent = `${range}   ${p.dumps.length} on disk`;
+              detail.textContent = partial
+                ? `${range}   ${complete} complete, ${partial} partial`
+                : `${range}   ${complete} complete`;
             } else {
               dot.className = "prereq-dot";
               detail.style.color = "";
