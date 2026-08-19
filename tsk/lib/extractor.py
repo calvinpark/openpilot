@@ -4,6 +4,7 @@ import subprocess
 import time
 from subprocess import check_output, CalledProcessError
 
+from tsk.lib import preflight_store
 from tsk.lib.env import is_agnos, PAYLOAD_PATH
 
 
@@ -24,8 +25,122 @@ class RetryError(Exception):
     return f"{self.message}\n\nTry again. If the problem persists, turn off the car, put it back into 'Not Ready to Drive' mode, and then try again."
 
 
+class SecurityAccessError(RetryError):
+  """A security-access failure, carrying which call failed and the ECU's own code.
+
+  Subclasses RetryError so every existing `except RetryError` keeps catching it, but
+  overrides __str__ to drop the inherited "Try again..." tail: a key the ECU received
+  and rejected is the one failure where retrying is the wrong advice.
+  """
+  def __init__(self, message, call, exception_name, service_id=None, error_code=None):
+    super().__init__(message)
+    self.call = call
+    self.exception_name = exception_name
+    self.service_id = service_id
+    self.error_code = error_code
+
+  def __str__(self) -> str:
+    return self.message
+
+
 class PandaError(Exception):
   pass
+
+
+def resolve_identity(panda, route=None, ecu_serial=None):
+  """(bus, param, ecu_serial) for this run.
+
+  The caller's values win; anything it leaves out comes from the last preflight, and
+  from (0, 0) plus `unattributed` when preflight never measured this panda in this
+  harness orientation. Any failure to read the panda's identity falls through to that
+  same default, which is the pre-preflight behaviour.
+  """
+  panda_serial = None
+  harness_status = None
+  try:
+    panda_serial = panda.get_serial()[0]
+  except Exception:
+    pass
+  try:
+    harness_status = panda.health().get("car_harness_status")
+  except Exception:
+    pass
+
+  bus, param, stored_serial = preflight_store.identity_for(panda_serial, harness_status)
+  if route is not None:
+    bus, param = int(route[0]), int(route[1])
+  return bus, param, ecu_serial if ecu_serial is not None else stored_serial
+
+
+def security_access_with_log(uds, ecu_serial=None, caller="extractor", stage_cb=None):
+  """REQUEST_SEED, then the gate, then SEND_KEY. Every attempt is recorded.
+
+  Shared by all three unlock paths rather than duplicated per module: the session
+  ladders differ per operation and stay separate, but the gate, the key math and the
+  log entry are identical, and three copies of a rule about not sending a second key
+  is three places to get it wrong.
+
+  stage_cb, when given, is called as stage_cb(name, outcome) for "seed" and "unlock".
+  Raises SecurityAccessError on any failure, including a pre-send block.
+  """
+  from Crypto.Cipher import AES
+  from opendbc.car.uds import ACCESS_TYPE, InvalidServiceIdError, InvalidSubAddressError, \
+    InvalidSubFunctionError, MessageTimeoutError, NegativeResponseError
+
+  # All five UDS exception types. The three original call sites caught three of them.
+  # InvalidSubFunctionError (uds.py:261, raised at :673 while parsing a response)
+  # fires AFTER the key is on the wire, so leaving it uncaught would reach an unlock
+  # with no log entry. InvalidSubAddressError (:265, raised at :382) cannot fire from
+  # here — that raise sits under `if self.rx_sub_addr is not None:` and every TSKM
+  # UdsClient is built with four positional arguments, leaving it None — and is
+  # caught anyway so the set matches what the callee declares.
+  uds_errors = (InvalidServiceIdError, InvalidSubAddressError, InvalidSubFunctionError,
+                MessageTimeoutError, NegativeResponseError)
+
+  call_stage = {"request_seed": "seed", "send_key": "unlock"}
+
+  def _fail(call, exc, message):
+    outcome, service_id, error_code, name = preflight_store.classify_security_exception(exc)
+    preflight_store.record_security_access_attempt(
+      ecu_serial, outcome, call, caller, service_id=service_id,
+      error_code=error_code, exception=name)
+    detail = f"NRC 0x{error_code:02x}" if error_code is not None else name
+    if stage_cb:
+      stage_cb(call_stage[call], detail)
+    return SecurityAccessError(f"{message} ({detail})", call, name,
+                               service_id=service_id, error_code=error_code)
+
+  seed_payload = b"\x00" * 16
+  try:
+    seed = uds.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=seed_payload)
+  except uds_errors as e:
+    raise _fail("request_seed", e, "Security Access failed") from e
+  if stage_cb:
+    stage_cb("seed", "received")
+
+  # The gate sits here, immediately before the send, rather than in the UI: hiding or
+  # disabling a row stops a tap and nothing else, while a stale page already open on
+  # a phone and a direct POST both reach this line on their own.
+  if preflight_store.is_unlock_blocked(ecu_serial):
+    if stage_cb:
+      stage_cb("unlock", "blocked")
+    raise SecurityAccessError(preflight_store.block_reason(ecu_serial), "send_key",
+                              "Blocked")
+
+  key = AES.new(TSKExtractor.SEED_KEY_SECRET, AES.MODE_ECB).decrypt(seed_payload)
+  key = AES.new(key, AES.MODE_ECB).encrypt(seed)
+  print(" - SEED:", seed.hex())
+  print(" - KEY:", key.hex())
+
+  try:
+    uds.security_access(ACCESS_TYPE.SEND_KEY, key)
+  except uds_errors as e:
+    raise _fail("send_key", e, "Security Access failed") from e
+
+  preflight_store.record_security_access_attempt(ecu_serial, "accepted", "send_key", caller)
+  if stage_cb:
+    stage_cb("unlock", "accepted")
+  return seed, key
 
 
 def format_version_for_error_display(version1, version2=None, length=8):
@@ -50,7 +165,6 @@ def format_version_for_error_display(version1, version2=None, length=8):
 class TSKExtractor:
   ADDR = 0x7a1
   DEBUG = False
-  BUS = 0
 
   SEED_KEY_SECRET = b'\xf0\x5f\x36\xb7\xd7\x8c\x03\xe2\x4a\xb4\xfa\xef\x2a\x57\xd0\x44'
 
@@ -113,17 +227,20 @@ class TSKExtractor:
     return key_struct[cls.SECOC_KEY_OFFSET:cls.SECOC_KEY_OFFSET + cls.SECOC_KEY_SIZE]
 
   @classmethod
-  def hack(cls):
-    """Extracts the SecOC key from the EPS ECU via UDS over CAN."""
+  def hack(cls, route=None, ecu_serial=None, stage_cb=None):
+    """Extracts the SecOC key from the EPS ECU via UDS over CAN.
+
+    route, when given, is the (bus, elm327 param) pair to run on; when omitted it
+    comes from the last preflight, falling back to (0, 0).
+    """
     if not is_agnos():
       raise NotAGNOSError
 
-    from Crypto.Cipher import AES
     from tqdm import tqdm
 
     from opendbc.car.isotp import isotp_send
     from opendbc.car.structs import CarParams
-    from opendbc.car.uds import UdsClient, ACCESS_TYPE, SESSION_TYPE, DATA_IDENTIFIER_TYPE, SERVICE_TYPE, \
+    from opendbc.car.uds import UdsClient, SESSION_TYPE, DATA_IDENTIFIER_TYPE, SERVICE_TYPE, \
       ROUTINE_CONTROL_TYPE, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
 
     # Kill the manager so it doesn't restart pandad during extraction.
@@ -134,9 +251,10 @@ class TSKExtractor:
     time.sleep(2)
 
     panda = cls._connect_panda()
-    panda.set_safety_mode(CarParams.SafetyModel.elm327)
+    route_bus, route_param, ecu_serial = resolve_identity(panda, route, ecu_serial)
+    panda.set_safety_mode(CarParams.SafetyModel.elm327, route_param)
 
-    uds_client = UdsClient(panda, cls.ADDR, cls.ADDR + 8, cls.BUS, timeout=0.1, response_pending_timeout=0.1)
+    uds_client = UdsClient(panda, cls.ADDR, cls.ADDR + 8, route_bus, timeout=0.1, response_pending_timeout=0.1)
 
     print("Getting application versions...")
 
@@ -178,27 +296,12 @@ class TSKExtractor:
     except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
       raise RetryError("Can't enter programming session for reading bootloader version")
 
-    # Security Access - Request Seed
-    try:
-      seed_payload = b"\x00" * 16
-      seed = uds_client.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=seed_payload)
+    # Security Access - request seed, gate, send key. Every attempt is logged.
+    print("\nSecurity Access...")
+    security_access_with_log(uds_client, ecu_serial=ecu_serial, caller="extractor",
+                             stage_cb=stage_cb)
+    print(" - Key OK!")
 
-      key = AES.new(cls.SEED_KEY_SECRET, AES.MODE_ECB).decrypt(seed_payload)
-      key = AES.new(key, AES.MODE_ECB).encrypt(seed)
-
-      print("\nSecurity Access...")
-
-      print(" - SEED:", seed.hex())
-      print(" - KEY:", key.hex())
-
-      # Security Access - Send Key
-      uds_client.security_access(ACCESS_TYPE.SEND_KEY, key)
-      print(" - Key OK!")
-
-    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-      raise RetryError("Security Access failed")
-
-    # Security Access - Send Key
     print("\nPreparing to upload payload...")
 
     try:
@@ -271,7 +374,7 @@ class TSKExtractor:
 
     # Manually send so we don't get stuck waiting for the response
     erase = b"\x31\x01\xff\x00" + data
-    isotp_send(panda, erase, cls.ADDR, bus=cls.BUS)
+    isotp_send(panda, erase, cls.ADDR, bus=route_bus)
 
     print("\nDumping keys...")
     start = 0xfebe6e34
@@ -290,7 +393,7 @@ class TSKExtractor:
           raise RetryError("Key dumping timed out")
 
         for addr, *_, data, bus in panda.can_recv():
-          if bus != cls.BUS:
+          if bus != route_bus:
             continue
 
           if data == b"\x03\x7f\x31\x78\x00\x00\x00\x00":  # Skip response pending
@@ -327,9 +430,9 @@ class TSKExtractor:
     return key_4.hex()
 
   @classmethod
-  def run(cls):
+  def run(cls, route=None, ecu_serial=None, stage_cb=None):
     try:
-      secoc_key = cls.hack()
+      secoc_key = cls.hack(route=route, ecu_serial=ecu_serial, stage_cb=stage_cb)
     except (BoarddNotRunningError, RetryError):
       raise
     except Exception as e:

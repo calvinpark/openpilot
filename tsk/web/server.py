@@ -8,15 +8,17 @@ import subprocess
 import threading
 import time
 import traceback
+import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+from tsk.lib import dump_files, preflight, preflight_store
 from tsk.lib.collect_can import collect as collect_can, count_oracle_frames, oracle_path as can_oracle_path, PROTECTED_TARGET, SYNC_TARGET
 from tsk.lib.dump_dataflash import DUMP_TOTAL, dump as dump_dataflash, dump_path
 from tsk.lib.dump_range import dump as dump_range, list_dumps as list_range_dumps, profile_for, PROFILE_KEYS, PROFILES
 from tsk.lib.env import is_agnos, setup
-from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
+from tsk.lib.extractor import NotAGNOSError, RetryError, SecurityAccessError, TSKExtractor
 from tsk.lib.key_file_manager import KeyFileManager, format_key
 from tsk.lib.matcher import run as run_matcher
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
@@ -506,6 +508,190 @@ def rehydrate_dataflash_state() -> None:
                             "If it doesn't work, restart the car into Not Ready To Drive mode and dump again.")
 
 
+# Preflight runs as a background job like the dump and the collect. preflight_state
+# carries the live log, the partial report and the rendered screenshot block, so a
+# page joining mid-run or after a restart sees everything the run produced so far.
+preflight_lock = threading.Lock()
+preflight_state = {
+  "status": "idle",   # idle | running | complete | failed
+  "has_run": False,
+  "blocked": False,
+  "passed": False,
+  "result": "",
+  "route": {},
+  "log": [],
+  "report": {},
+  "screenshot": "",
+  "message": "",
+  "bytes": 0,
+  "total": 0,
+}
+
+# Live-log cap. A run writes a bounded number of lines, but a page that polls for an
+# hour should not be able to grow this without limit.
+PREFLIGHT_LOG_LIMIT = 400
+
+
+def _preflight_log(text) -> None:
+  for line in str(text).split("\n"):
+    with preflight_lock:
+      preflight_state["log"].append(line)
+      if len(preflight_state["log"]) > PREFLIGHT_LOG_LIMIT:
+        del preflight_state["log"][:-PREFLIGHT_LOG_LIMIT]
+
+
+def _preflight_report(report) -> None:
+  # Re-render on every publish so a run that dies partway still leaves the steps above
+  # it on screen, which is what the pinned block is for.
+  screenshot = preflight.render_screenshot(report)
+  result = preflight.result_line(report)
+  with preflight_lock:
+    preflight_state["report"] = report
+    preflight_state["screenshot"] = screenshot
+    preflight_state["route"] = report.get("route") or {}
+    preflight_state["result"] = result
+    preflight_state["passed"] = (result == preflight.READY_RESULT)
+
+
+def _preflight_progress(status=None, frames=None, bytes_done=None, total=None,
+                        message=None) -> None:
+  with preflight_lock:
+    if bytes_done is not None:
+      preflight_state["bytes"] = bytes_done
+    if total is not None:
+      preflight_state["total"] = total
+
+
+def _refresh_preflight_gates() -> None:
+  """Recompute the flags the UI gates on, from disk, on every status poll.
+
+  `passed` is the gate on the dump rows and it comes from the report's own result
+  line. `has_run` is weaker on purpose and gates nothing: a route is stored even by a
+  run that never opened PROGRAMMING, so a route existing says the ECU was reached and
+  never that a dump can work.
+  """
+  has_run = preflight_store.has_run()
+  blocked = preflight_store.is_unlock_blocked(preflight_store.stored_ecu_serial())
+  with preflight_lock:
+    preflight_state["has_run"] = has_run
+    preflight_state["blocked"] = blocked
+    report = preflight_state["report"]
+    result = preflight.result_line(report) if report else ""
+    preflight_state["result"] = result
+    preflight_state["passed"] = (result == preflight.READY_RESULT)
+
+
+def _run_preflight_job() -> None:
+  try:
+    runner = preflight.run if is_agnos() else preflight.run_mock
+    report = runner(log_cb=_preflight_log, report_cb=_preflight_report,
+                    progress_cb=_preflight_progress)
+    _preflight_report(report)
+    with preflight_lock:
+      preflight_state.update(status="complete",
+                             message=report.get("result", ""))
+  except NotAGNOSError:
+    # Reached only if is_agnos() flipped between the check above and the call.
+    report = preflight.run_mock(log_cb=_preflight_log, report_cb=_preflight_report,
+                                progress_cb=_preflight_progress)
+    _preflight_report(report)
+    with preflight_lock:
+      preflight_state.update(status="complete", message=report.get("result", ""))
+  except Exception as e:
+    _preflight_log(f"{type(e).__name__}: {e}")
+    with preflight_lock:
+      preflight_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    _refresh_preflight_gates()
+    panda_lock.release()
+
+
+def start_preflight_job() -> bool:
+  # panda_lock is the gate, exactly as for the dump and the collect.
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with preflight_lock:
+    preflight_state.update(status="running", log=[], report={}, screenshot="",
+                           message="", bytes=0, total=0)
+  try:
+    threading.Thread(target=_run_preflight_job, name="tsk_preflight",
+                     daemon=True).start()
+  except Exception:
+    # The job thread never took ownership, so release the lock and clear the state
+    # here — otherwise panda_lock would wedge every panda op until a restart.
+    with preflight_lock:
+      preflight_state.update(status="failed", message="Could not start preflight.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def rehydrate_preflight_state() -> None:
+  # The route, the log and the last report all persist, so a restart shows the last
+  # run rather than an empty page that invites a needless second unlock.
+  report = preflight_store.latest_report()
+  if report:
+    with preflight_lock:
+      preflight_state.update(
+        status="complete",
+        report=report,
+        screenshot=report.get("screenshot") or preflight.render_screenshot(report),
+        route=report.get("route") or {},
+        message=report.get("result", ""),
+      )
+  # After the report is in place, since the gate is computed from it. Refreshing first
+  # would leave `passed` False until the first poll, which is a restart briefly
+  # locking the rows on a car that already passed.
+  _refresh_preflight_gates()
+
+
+def _panda_busy() -> bool:
+  """True while any panda operation holds the lock. Probe-and-release, so this never
+  takes ownership away from a job that is about to start."""
+  if panda_lock.acquire(blocking=False):
+    panda_lock.release()
+    return False
+  return True
+
+
+def delete_dumps() -> str:
+  """Remove everything under /cache/tsk, log included, and reset the in-memory state
+  that mirrors it.
+
+  Returns "" on success, or a reason token naming what stopped it: "busy" when a
+  panda job holds the lock, "failed" when files remain on disk afterwards. Two causes
+  behind one bool told an owner with a permission failure to wait for a panda
+  operation that had already finished.
+
+  The filesystem half lives in tsk/lib/dump_files.py; this owns only the state reset.
+  Never touches the installed key: that lives at /cache/params/SecOCKey, outside the
+  tree. Clearing the security-access log is deliberate and costs the owner nothing —
+  a block only exists before a car's first accepted unlock, which is a state in which
+  no dump can have run, so there is nothing else in the tree to lose.
+  """
+  if _panda_busy():
+    return "busy"
+  if not dump_files.delete_all():
+    return "failed"
+  with can_lock:
+    can_state.update(ready=False, status="idle", sync_count=0, protected_count=0,
+                     seconds=0.0, message="")
+  with df_lock:
+    df_state.update(ready=False, status="idle", frames=0, bytes=0, total=DUMP_TOTAL,
+                    message="", size=0)
+  with range_lock:
+    for key in PROFILE_KEYS:
+      range_state[key].update(status="idle", ready=False, frames=0, bytes=0,
+                              total=PROFILES[key].total, message="", dumps=[],
+                              complete_count=0, partial_count=0)
+  with preflight_lock:
+    preflight_state.update(status="idle", report={}, screenshot="", log=[], route={},
+                           message="", bytes=0, total=0, result="", passed=False)
+  _refresh_preflight_gates()
+  return ""
+
+
 def _can_progress(seconds=None, sync=None, protected=None) -> None:
   with can_lock:
     if seconds is not None:
@@ -665,6 +851,14 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       except NotAGNOSError:
         self._send_extract_dry_run()
         return
+      except SecurityAccessError as e:
+        # A refusal the tool made on purpose, or the ECU's own verdict on a key.
+        # Neither is an unexpected error, so no traceback and no ping line: those
+        # would send an owner to #toyota-security over a working safeguard.
+        self._send_json({
+          "ok": False,
+          "message": str(e),
+        }, status=HTTPStatus.CONFLICT)
       except Exception as e:
         tb = traceback.format_exc()
         self._send_json({
@@ -818,6 +1012,37 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running", "profile": key})
       return
 
+    if path == "/api/preflight":
+      if not start_preflight_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "Preflight or another panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running"})
+      return
+
+    if path == "/api/delete-dumps":
+      reason = delete_dumps()
+      if reason == "busy":
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is in progress. Wait for it to finish, then delete.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      if reason:
+        # Waiting will not fix this one, so it must not read as the busy case.
+        self._send_json({
+          "ok": False,
+          "status": "failed",
+          "message": "Some files could not be removed. The dumps are still on the device.",
+        }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        return
+      self._send_json({"ok": True})
+      return
+
     if path == "/api/clear-cache":
       with can_lock:
         can_running = can_state["status"] == "running"
@@ -881,6 +1106,22 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json(payload, send_body=send_body)
       return
 
+    if path == "/api/preflight-status":
+      # Recompute the two gate flags on every poll rather than only at job end: a
+      # range dump or an extract that gets a rejected key writes the log from its own
+      # thread, and a cached flag would leave the rows enabled until a restart. Two
+      # small JSON reads at 1 Hz.
+      _refresh_preflight_gates()
+      with preflight_lock:
+        payload = dict(preflight_state)
+        payload["log"] = list(preflight_state["log"])
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/download-dumps":
+      self._send_dumps_zip(send_body=send_body)
+      return
+
     if path == "/api/reboot":
       try:
         self._send_json(get_reboot_actions_payload(), send_body=send_body)
@@ -905,6 +1146,47 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       return
 
     self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND, send_body=send_body)
+
+  def _send_dumps_zip(self, send_body: bool = True) -> None:
+    """Stream /cache/tsk as one zip.
+
+    Streamed into the socket rather than staged on disk: the tree can hold several
+    2 MB code-flash dumps, and writing a copy of it into /cache to serve it would
+    double the space a device has least of. No Content-Length goes out, which is
+    what the HTTP/1.0 default this handler serves already means — the client reads
+    to close.
+    """
+    if _panda_busy():
+      self._send_json({
+        "ok": False,
+        "status": "running",
+        "message": "A panda operation is in progress. Wait for it to finish, then download.",
+      }, status=HTTPStatus.CONFLICT, send_body=send_body)
+      return
+
+    files = dump_files.list_files()
+    if not files:
+      self._send_json({
+        "ok": False,
+        "message": "Nothing to download yet.",
+      }, status=HTTPStatus.NOT_FOUND, send_body=send_body)
+      return
+
+    self.send_response(HTTPStatus.OK)
+    self.send_header("Content-Type", "application/zip")
+    self.send_header("Content-Disposition", f'attachment; filename="{dump_files.zip_name()}"')
+    self.send_header("Cache-Control", "no-store")
+    self.end_headers()
+    if not send_body:
+      return
+    try:
+      with zipfile.ZipFile(self.wfile, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in files:
+          archive.write(path, arcname=dump_files.arcname(path))
+    except (OSError, ValueError):
+      # The response is already committed, so the only signal left is the truncated
+      # stream the client sees.
+      pass
 
   def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK, send_body: bool = True) -> None:
     body = json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -942,6 +1224,7 @@ def main() -> None:
   rehydrate_dataflash_state()
   rehydrate_can_state()
   rehydrate_range_state()
+  rehydrate_preflight_state()
   update_offroad_alert()
   threading.Thread(target=offroad_alert_loop, name="tsk_offroad_alert", daemon=True).start()
 

@@ -11,7 +11,9 @@ This shares the UDS session-setup preamble with tsk/lib/extractor.py but is a
 distinct operation: a different payload (payload_dataflash_ff200000_ff208000.bin),
 a different dump range, and a raw frame collector instead of the key-struct parser.
 The ~6 shared preamble lines are deliberately duplicated so the two operations
-stay independently testable rather than coupled through a shared helper.
+stay independently testable rather than coupled through a shared helper. The SECURITY
+block is the exception and is shared, through extractor.security_access_with_log():
+the gate, the key math and the log entry are identical across all three unlock paths.
 """
 import hashlib
 import struct
@@ -20,11 +22,13 @@ import time
 from pathlib import Path
 
 from tsk.lib.env import is_agnos, DATAFLASH_DIR, DATAFLASH_PAYLOAD_PATH
-from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
+from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor, resolve_identity, \
+  security_access_with_log
 
-# EPS UDS parameters (shared with the extractor)
+# EPS UDS parameter shared with the extractor. The bus is NOT a constant here:
+# resolve_identity() supplies it per run, defaulting to preflight_store.DEFAULT_ROUTE
+# when preflight has never measured one.
 ADDR = TSKExtractor.ADDR  # 0x7a1
-BUS = TSKExtractor.BUS    # 0
 
 # Dump range
 DUMP_START = 0xFF200000
@@ -119,7 +123,7 @@ def _finalize(dump_buf, received, frames_count, bytes_received) -> dict:
   }
 
 
-def dump(progress_cb=None) -> dict:
+def dump(progress_cb=None, route=None, ecu_serial=None, stage_cb=None) -> dict:
   """Upload the payload and dump 0xFF200000-0xFF208000 from the EPS.
 
   progress_cb, if given, is called as
@@ -127,18 +131,19 @@ def dump(progress_cb=None) -> dict:
   with whichever keys changed. Returns a dict:
     {status, frames, bytes, total, dump_path, message}
   where status is one of: complete | partial | key_missed | failed.
+  route, when given, is the (bus, elm327 param) pair to run on; when omitted it comes
+  from the last preflight, falling back to (0, 0).
   Raises NotAGNOSError off-device.
   """
   if not is_agnos():
     raise NotAGNOSError
 
   cb = progress_cb or _noop
-
-  from Crypto.Cipher import AES
+  stage = stage_cb or (lambda name, outcome: None)
 
   from opendbc.car.isotp import isotp_send
   from opendbc.car.structs import CarParams
-  from opendbc.car.uds import UdsClient, ACCESS_TYPE, SESSION_TYPE, SERVICE_TYPE, \
+  from opendbc.car.uds import UdsClient, SESSION_TYPE, SERVICE_TYPE, \
     ROUTINE_CONTROL_TYPE, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
 
   # Verify the payload before touching the car.
@@ -156,33 +161,44 @@ def dump(progress_cb=None) -> dict:
   time.sleep(2)
 
   panda = TSKExtractor._connect_panda()
-  panda.set_safety_mode(CarParams.SafetyModel.elm327)
+  route_bus, route_param, ecu_serial = resolve_identity(panda, route, ecu_serial)
+  panda.set_safety_mode(CarParams.SafetyModel.elm327, route_param)
 
-  uds = UdsClient(panda, ADDR, ADDR + 8, BUS, timeout=0.1, response_pending_timeout=0.1)
+  uds = UdsClient(panda, ADDR, ADDR + 8, route_bus, timeout=0.1, response_pending_timeout=0.1)
 
   # Mandatory programming-session flow. Inter-transition sleeps match the Bk2ol
   # reference's known-good dataflash timing; the PROGRAMMING -> PROGRAMMING repeat
-  # in particular is not exercised back-to-back by the extractor.
-  try:
-    uds.diagnostic_session_control(SESSION_TYPE.DEFAULT)
-    time.sleep(0.5)
-    uds.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC)
-    time.sleep(0.7)
-    uds.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
-    time.sleep(1.0)
-    uds.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
-  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-    raise RetryError("Can't enter programming session.")
+  # in particular is not exercised back-to-back by the extractor. Same sequence and
+  # same sleeps as before; only the exception granularity changed, so a report can
+  # name which transition failed instead of one "can't enter programming".
+  session_ladder = (
+    ("default", SESSION_TYPE.DEFAULT, 0.5),
+    ("extended", SESSION_TYPE.EXTENDED_DIAGNOSTIC, 0.7),
+    ("programming", SESSION_TYPE.PROGRAMMING, 1.0),
+    ("programming_repeat", SESSION_TYPE.PROGRAMMING, 0.0),
+  )
+  for name, session, settle in session_ladder:
+    try:
+      uds.diagnostic_session_control(session)
+    except NegativeResponseError as e:
+      stage(name, f"NRC 0x{e.error_code:02x}")
+      raise RetryError(f"Can't enter programming session (NRC 0x{e.error_code:02x} "
+                       f"at the {name} session).")
+    except MessageTimeoutError:
+      stage(name, "silent")
+      raise RetryError(f"Can't enter programming session (no answer to the {name} "
+                       "session request).")
+    except InvalidServiceIdError:
+      stage(name, "invalid response")
+      raise RetryError(f"Can't enter programming session (invalid response to the "
+                       f"{name} session request).")
+    stage(name, "opened")
+    if settle:
+      time.sleep(settle)
 
-  # Security access.
-  try:
-    seed_payload = b"\x00" * 16
-    seed = uds.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=seed_payload)
-    key = AES.new(TSKExtractor.SEED_KEY_SECRET, AES.MODE_ECB).decrypt(seed_payload)
-    key = AES.new(key, AES.MODE_ECB).encrypt(seed)
-    uds.security_access(ACCESS_TYPE.SEND_KEY, key)
-  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-    raise RetryError("Security Access failed")
+  # Security access: request seed, gate, send key. Every attempt is logged.
+  security_access_with_log(uds, ecu_serial=ecu_serial, caller="dump_dataflash",
+                           stage_cb=stage_cb)
 
   # Upload and verify the payload.
   try:
@@ -206,7 +222,7 @@ def dump(progress_cb=None) -> dict:
   # Trigger the payload via the erase routine. Send manually so we don't block
   # waiting for a response that never comes. Same vector as extractor.hack().
   erase = b"\x31\x01\xff\x00" + b"\x45\x00" + struct.pack("!I", TRIGGER_ADDR) + struct.pack("!I", TRIGGER_SIZE)
-  isotp_send(panda, erase, ADDR, bus=BUS)
+  isotp_send(panda, erase, ADDR, bus=route_bus)
 
   # Collect dump frames. Each frame carries a 24-bit pointer (low 3 bytes of the
   # address) plus 4 data bytes; the top address byte comes from DUMP_START.
@@ -223,7 +239,7 @@ def dump(progress_cb=None) -> dict:
 
     made_progress = False
     for addr, *_, data, bus in panda.can_recv():
-      if bus != BUS or addr != ADDR + 8 or len(data) < 8:
+      if bus != route_bus or addr != ADDR + 8 or len(data) < 8:
         continue
       if data == RESPONSE_PENDING:
         continue

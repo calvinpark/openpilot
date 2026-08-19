@@ -12,22 +12,35 @@ Vehicle requirement: Not Ready to Drive mode (not READY Mode), same as the
 production dump. Keeping the comma powered so the panda doesn't cold-cycle gives a
 complete dump on the first run.
 
-PROVEN FOR ONE RANGE, UNPROVEN FOR THE OTHER FIVE. The `dataflash` payload
-(sha256 9545c419…) ran on the car on 2026-07-29 and its dump carried two values that
-were on record beforehand: the SecOC key at 0xFF206E14 and the ECU master key at
-0xFF206ED4. Matching a known answer exercises the whole chain — shellcode recovery,
-immediate patching, CRC/CMAC rebuild, upload, trigger, and the frame reassembly below.
-The other five payloads come off the same source shellcode and differ from the proven
-one only at the four range patch sites (make_payloads.py --diff asserts exactly that),
-and each is checked to decrypt to crc32 == 0xffffffff with a valid CMAC with its
-immediates reading back as the requested range — but none has run. For those five a
-null result still means "unknown" rather than evidence about the part, since an
-unmapped or read-protected region and a payload that never reached its dump loop are
-indistinguishable from here.
+ALL SIX HAVE NOW RUN. The `dataflash` payload (sha256 9545c419…) ran on the car on
+2026-07-29 and its dump carried two values that were on record beforehand: the SecOC
+key at 0xFF206E14 and the ECU master key at 0xFF206ED4. Matching a known answer
+exercises the whole chain — shellcode recovery, immediate patching, CRC/CMAC rebuild,
+upload, trigger, and the frame reassembly below. The other five come off the same
+source shellcode and differ from it only at the four range patch sites
+(make_payloads.py --diff asserts exactly that), each decrypting to crc32 == 0xffffffff
+with a valid CMAC and immediates reading back as the requested range. All six then ran
+on Calvin's Sienna on 2026-08-13 (52 files, nine runs per profile bar codeflash at
+three) and five ran on albinoelephant's 2023 Corolla on 2026-08-14 (15 files), every
+one returning structured content. So a null from any of them is now evidence about the
+part rather than an untested payload.
 
-This mirrors the UDS session preamble in dump_dataflash.py by deliberate duplication
-rather than a shared helper, matching the existing split between that module and
-extractor.py: the production path stays untouched by anything done here.
+Two live caveats on reading a null, both from the dumps themselves:
+  - A SINGLE CAPTURE IS WEAK. Two DataFlash captures 21 seconds apart, both reporting
+    100 % coverage, differed in 16,703 of 65,536 bytes (25.487 %). Repeat a profile
+    before drawing anything from one image; that is why the 08-13 session ran nine.
+  - THE RANGES ARE FOR THE WRONG PART NUMBER ON A COROLLA. Every boundary here comes
+    from the RH850/P1M-E manual Table 4.1 for R7F701381, and albinoelephant's EPS
+    self-names as R7F701383 at code-flash 0x000180, for which no public datasheet has
+    been found. If the ...383 carries more than 64 KB of DataFlash, `dataflash` reads
+    a fraction of the array and its null says nothing.
+
+The UDS session preamble still mirrors dump_dataflash.py by deliberate duplication:
+the ladders differ per operation and stay separate, so the production path is untouched
+by a change to a range. The SECURITY block is the exception and is shared, through
+extractor.security_access_with_log() — the gate, the key math and the log entry are
+identical across all three unlock paths, and three copies of a rule about not sending a
+second key would be three places to get it wrong.
 """
 import hashlib
 import struct
@@ -37,11 +50,13 @@ from datetime import datetime
 from pathlib import Path
 
 from tsk.lib.env import is_agnos, RANGE_DUMP_DIR
-from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
+from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor, resolve_identity, \
+  security_access_with_log
 
-# EPS UDS parameters (shared with the extractor and the production dump)
+# EPS UDS parameter shared with the extractor and the production dump. The bus is
+# NOT a constant here: resolve_identity() supplies it per run, defaulting to
+# preflight_store.DEFAULT_ROUTE when preflight has never measured one.
 ADDR = TSKExtractor.ADDR  # 0x7a1
-BUS = TSKExtractor.BUS    # 0
 
 # Payload upload/trigger vector. Identical to dump_dataflash.dump(); only the
 # payload bytes and the dump range differ between profiles.
@@ -152,11 +167,14 @@ PROFILES = {
       "fba7950a62939f75d7b06e08fc1fe4ceea5fd2109b8fe4677494a3777543a35d",
       0xFEDE0000, 0xFEE00000,
       alias_note=(
-        "0xFEBF0000 is at offset 0x10000 of the PE1 window and 0xFEDF0000 is at "
-        "offset 0x10000 of this one. If 'self' aliases the PE1 area — which is what "
-        "this profile exists to test — the payload's 4096 bytes appear here at "
-        "offset 0x10000 with no absolute-address overlap to flag them. Compare this "
-        "dump against a local_ram_pe1 dump at offset 0x10000 to settle it."
+        "SETTLED 2026-08-13 on R7F701381: this window IS the PE1 window. Nine runs of "
+        "each gave three fixed key records byte-identical at identical offsets in "
+        "both, cross-window difference 2.676-3.001 % against within-window "
+        "2.523-3.022 %, and 22.552 % for unrelated memory. So the payload's own 4096 "
+        "bytes appear here at offset 0x10000 (0xFEDF0000) with no absolute-address "
+        "overlap for clobber_span() to flag. The alias is a property of the silicon, "
+        "so it does not transfer to another part number: run this profile on the "
+        "first dump of any part that has not been measured."
       ),
     ),
     Profile(
@@ -306,7 +324,7 @@ def _finalize(profile, dump_buf, frames_count, bytes_received, stamp) -> dict:
   }
 
 
-def dump(profile_key, progress_cb=None) -> dict:
+def dump(profile_key, progress_cb=None, route=None, ecu_serial=None, stage_cb=None) -> dict:
   """Upload the profile's payload and dump its range from the EPS.
 
   progress_cb, if given, is called as
@@ -314,6 +332,12 @@ def dump(profile_key, progress_cb=None) -> dict:
   with whichever keys changed. Returns a dict:
     {status, frames, bytes, total, dump_path, message}
   where status is one of: complete | partial | empty | failed.
+  route, when given, is the (bus, elm327 param) pair to run on; when omitted it comes
+  from the last preflight, falling back to (0, 0).
+  stage_cb, when given, is called as stage_cb(name, outcome) for each session
+  transition, the seed, the unlock, the upload and the trigger. This one call is the
+  whole exploit: preflight drives it rather than running a security stage of its own,
+  so one press sends exactly one key.
   Raises NotAGNOSError off-device.
   """
   profile = PROFILES.get(profile_key)
@@ -324,13 +348,12 @@ def dump(profile_key, progress_cb=None) -> dict:
     raise NotAGNOSError
 
   cb = progress_cb or _noop
+  stage = stage_cb or (lambda name, outcome: None)
   stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-
-  from Crypto.Cipher import AES
 
   from opendbc.car.isotp import isotp_send
   from opendbc.car.structs import CarParams
-  from opendbc.car.uds import UdsClient, ACCESS_TYPE, SESSION_TYPE, SERVICE_TYPE, \
+  from opendbc.car.uds import UdsClient, SESSION_TYPE, SERVICE_TYPE, \
     ROUTINE_CONTROL_TYPE, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
 
   # Verify the payload before touching the car.
@@ -348,31 +371,42 @@ def dump(profile_key, progress_cb=None) -> dict:
   time.sleep(2)
 
   panda = TSKExtractor._connect_panda()
-  panda.set_safety_mode(CarParams.SafetyModel.elm327)
+  route_bus, route_param, ecu_serial = resolve_identity(panda, route, ecu_serial)
+  panda.set_safety_mode(CarParams.SafetyModel.elm327, route_param)
 
-  uds = UdsClient(panda, ADDR, ADDR + 8, BUS, timeout=0.1, response_pending_timeout=0.1)
+  uds = UdsClient(panda, ADDR, ADDR + 8, route_bus, timeout=0.1, response_pending_timeout=0.1)
 
-  # Mandatory programming-session flow, timing identical to the production dump.
-  try:
-    uds.diagnostic_session_control(SESSION_TYPE.DEFAULT)
-    time.sleep(0.5)
-    uds.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC)
-    time.sleep(0.7)
-    uds.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
-    time.sleep(1.0)
-    uds.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
-  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-    raise RetryError("Can't enter programming session.")
+  # Mandatory programming-session flow, timing identical to the production dump. Same
+  # sequence and same sleeps as before; the single except is split per transition so a
+  # report can name which one failed rather than collapsing four to one message.
+  session_ladder = (
+    ("default", SESSION_TYPE.DEFAULT, 0.5),
+    ("extended", SESSION_TYPE.EXTENDED_DIAGNOSTIC, 0.7),
+    ("programming", SESSION_TYPE.PROGRAMMING, 1.0),
+    ("programming_repeat", SESSION_TYPE.PROGRAMMING, 0.0),
+  )
+  for name, session, settle in session_ladder:
+    try:
+      uds.diagnostic_session_control(session)
+    except NegativeResponseError as e:
+      stage(name, f"NRC 0x{e.error_code:02x}")
+      raise RetryError(f"Can't enter programming session (NRC 0x{e.error_code:02x} "
+                       f"at the {name} session).")
+    except MessageTimeoutError:
+      stage(name, "silent")
+      raise RetryError(f"Can't enter programming session (no answer to the {name} "
+                       "session request).")
+    except InvalidServiceIdError:
+      stage(name, "invalid response")
+      raise RetryError(f"Can't enter programming session (invalid response to the "
+                       f"{name} session request).")
+    stage(name, "opened")
+    if settle:
+      time.sleep(settle)
 
-  # Security access.
-  try:
-    seed_payload = b"\x00" * 16
-    seed = uds.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=seed_payload)
-    key = AES.new(TSKExtractor.SEED_KEY_SECRET, AES.MODE_ECB).decrypt(seed_payload)
-    key = AES.new(key, AES.MODE_ECB).encrypt(seed)
-    uds.security_access(ACCESS_TYPE.SEND_KEY, key)
-  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-    raise RetryError("Security Access failed")
+  # Security access: request seed, gate, send key. Every attempt is logged.
+  security_access_with_log(uds, ecu_serial=ecu_serial,
+                           caller=f"dump_range:{profile.key}", stage_cb=stage_cb)
 
   # Upload and verify the payload.
   try:
@@ -391,12 +425,15 @@ def dump(profile_key, progress_cb=None) -> dict:
     verify = b"\x45\x00" + struct.pack("!I", PAYLOAD_LOAD_ADDR) + struct.pack("!I", PAYLOAD_LOAD_SIZE)
     uds.routine_control(ROUTINE_CONTROL_TYPE.START, 0x10f0, verify)
   except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
+    stage("upload", "failed")
     raise RetryError("Payload upload failed")
+  stage("upload", "accepted")
 
   # Trigger the payload via the erase routine. Send manually so we don't block
   # waiting for a response that never comes. Same vector as extractor.hack().
   erase = b"\x31\x01\xff\x00" + b"\x45\x00" + struct.pack("!I", TRIGGER_ADDR) + struct.pack("!I", TRIGGER_SIZE)
-  isotp_send(panda, erase, ADDR, bus=BUS)
+  isotp_send(panda, erase, ADDR, bus=route_bus)
+  stage("trigger", "sent")
 
   # Collect dump frames. Each frame carries a 24-bit pointer (low 3 bytes of the
   # address) plus 4 data bytes; the top address byte comes from the profile start.
@@ -415,7 +452,7 @@ def dump(profile_key, progress_cb=None) -> dict:
 
     made_progress = False
     for addr, *_, data, bus in panda.can_recv():
-      if bus != BUS or addr != ADDR + 8 or len(data) < 8:
+      if bus != route_bus or addr != ADDR + 8 or len(data) < 8:
         continue
       if data == RESPONSE_PENDING:
         continue
@@ -450,4 +487,6 @@ def dump(profile_key, progress_cb=None) -> dict:
 
   bytes_received = bytes_covered
   cb(status="running", frames=frames_count, bytes_done=bytes_received, total=profile.total)
-  return _finalize(profile, dump_buf, frames_count, bytes_received, stamp)
+  result = _finalize(profile, dump_buf, frames_count, bytes_received, stamp)
+  stage("dump", f"{bytes_received} of {profile.total} bytes")
+  return result

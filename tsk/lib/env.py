@@ -17,14 +17,22 @@ DATAFLASH_PAYLOAD_PATH = str(Path(__file__).parent / "payload_dataflash_ff200000
 # CAN messages and DataFlash dumps live under /cache so they survive reboot but
 # clear on AGNOS update. Off-device they go under ~/comma_data for dry-run testing.
 CACHE_DIR = "/cache" if is_agnos() else f"{COMMA_DATA_DIR}/cache"
-DATAFLASH_DIR = f"{CACHE_DIR}/tsk/dataflash"
-CAN_MESSAGES_DIR = f"{CACHE_DIR}/tsk/can-messages"
+TSK_DIR = f"{CACHE_DIR}/tsk"
+DATAFLASH_DIR = f"{TSK_DIR}/dataflash"
+CAN_MESSAGES_DIR = f"{TSK_DIR}/can-messages"
 CAN_ORACLE_PATH = f"{CAN_MESSAGES_DIR}/can_oracle.ndjson"
 
 # Exploratory range dumps (dump_range.py). Kept out of DATAFLASH_DIR so the matcher,
 # which looks for one exact filename there, can never pick one up. Timestamped
 # filenames, so repeated runs of the same profile accumulate instead of overwriting.
-RANGE_DUMP_DIR = f"{CACHE_DIR}/tsk/range-dumps"
+RANGE_DUMP_DIR = f"{TSK_DIR}/range-dumps"
+
+# Preflight: one JSON report per run, the measured route, and the security-access log.
+# All three sit under TSK_DIR so Download Dumps carries them out with the dumps and
+# Delete Dumps clears them together.
+PREFLIGHT_DIR = f"{TSK_DIR}/preflight"
+PREFLIGHT_ROUTE_PATH = f"{PREFLIGHT_DIR}/route.json"
+SECURITY_ACCESS_LOG_PATH = f"{TSK_DIR}/security_access_log.json"
 
 RECOMMENDED_OP_USER = "commaai"
 RECOMMENDED_OP_BRANCH = "nightly-dev"

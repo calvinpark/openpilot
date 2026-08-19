@@ -98,6 +98,15 @@
       .prereq-dot.ready { background: #34c759; }
       .prereq-dot.warn { background: #ffcc00; }
 
+      /* A row that must not be tapped yet. pointer-events is what actually stops the
+         navigation — an <a> has no disabled attribute, so dimming it alone would still
+         let a tap through. */
+      .prereq-row.locked,
+      .group-item.locked {
+        opacity: 0.45;
+        pointer-events: none;
+      }
+
       .prereq-body { flex: 1; min-width: 0; }
 
       .prereq-title {
@@ -125,6 +134,12 @@
         color: #c7c7cc;
         cursor: default;
       }
+
+      /* Hidden rather than deleted: loadRebootActions() and setRunning() reach for
+         these nodes by id, so removing them makes renderLabel() throw on every poll.
+         Same approach the span branch used for the same reason. */
+      .hidden-row,
+      .group-item.hidden-row { display: none; }
 
       .group-item.disabled:active {
         background: #fff;
@@ -318,9 +333,21 @@
         <div class="status-key" id="keyDetail"></div>
       </div>
 
+      <div class="section-label">Start here</div>
+      <div class="group">
+        <a class="prereq-row" href="/preflight.html" id="preflightRow">
+          <div class="prereq-dot" id="preflightDot"></div>
+          <div class="prereq-body">
+            <div class="prereq-title">Preflight check</div>
+            <div class="prereq-detail" id="preflightDetail">Not run yet</div>
+          </div>
+          <div class="prereq-chevron">›</div>
+        </a>
+      </div>
+
       <div class="section-label">2021, 2022, 2023 RAV4 Prime &amp; Sienna</div>
       <div class="group">
-        <a class="group-item action" href="/extractor.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">TSK Extractor <span class="chevron">›</span></a>
+        <a class="group-item action" href="/extractor.html" id="extractorRow" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">TSK Extractor <span class="chevron">›</span></a>
       </div>
 
       <div class="section-label">2021+</div>
@@ -399,16 +426,22 @@
         </a>
       </div>
 
-      <div class="section-label">Manage</div>
+      <div class="section-label">Files</div>
       <div class="group">
+        <a class="group-item action" id="downloadBtn" href="/api/download-dumps">Download dumps</a>
+        <button class="group-item danger" type="button" id="deleteBtn">Delete dumps</button>
+      </div>
+
+      <div class="section-label hidden-row">Manage</div>
+      <div class="group hidden-row">
         <button class="group-item disabled" type="button" id="cleanerBtn" disabled>Clear extraction cache</button>
         <button class="group-item disabled" type="button" id="uninstallBtn" disabled>Uninstall key</button>
       </div>
 
       <div class="section-label">Reboot</div>
       <div class="group">
-        <button class="group-item" type="button" id="recommendedBtn">Install recommended</button>
-        <button class="group-item" type="button" id="alternateBtn">Install alternate</button>
+        <button class="group-item hidden-row" type="button" id="recommendedBtn">Install recommended</button>
+        <button class="group-item hidden-row" type="button" id="alternateBtn">Install alternate</button>
         <button class="group-item" type="button" id="differentBtn">Install a different fork/branch</button>
         <button class="group-item" type="button" id="retryBtn">Reboot to try again</button>
       </div>
@@ -439,7 +472,23 @@
         dfPartial: false,
         dfBytes: 0,
         dfTotal: 32768,
+        preflightPassed: false,
+        preflightBlocked: false,
+        jobRunning: false,
       };
+
+      // Every row that ends in a SEND_KEY. The CAN collect and Find send none, so they
+      // are never gated here. Disabling these is a courtesy on top of the real gate,
+      // which sits in tsk/lib immediately before the send: a page already open on a
+      // phone and a direct POST both reach that line without passing through here.
+      const UNLOCK_ROWS = ["extractorRow", "dfRow"];
+      // Both of these run the session ladder and need security access, so a preflight
+      // that did not pass makes either one a guaranteed failure that spends the
+      // owner's car time. extractorRow additionally auto-runs on load. The CAN row is
+      // absent on purpose: collecting sends no key and needs no session.
+      const PREFLIGHT_GATED_ROWS = ["extractorRow", "dfRow"];
+      const RANGE_PROFILES = ["codeflash", "extended_codeflash", "local_ram_pe1",
+                              "local_ram_self", "global_ram", "dataflash"];
 
       const els = {
         webUrl: document.getElementById("webUrl"),
@@ -453,6 +502,8 @@
         matcherBtn: document.getElementById("matcherBtn"),
         uninstallBtn: document.getElementById("uninstallBtn"),
         cleanerBtn: document.getElementById("cleanerBtn"),
+        downloadBtn: document.getElementById("downloadBtn"),
+        deleteBtn: document.getElementById("deleteBtn"),
         recommendedBtn: document.getElementById("recommendedBtn"),
         alternateBtn: document.getElementById("alternateBtn"),
         differentBtn: document.getElementById("differentBtn"),
@@ -700,6 +751,8 @@
           ]);
           state.canReady = can.ready;
           state.dfReady = df.ready;
+          state.jobRunning = state.pfRunning || can.status === "running" ||
+                             df.status === "running" || state.rangeRunning;
           state.dfPartial = df.status === "partial";
           state.dfBytes = df.bytes || 0;
           state.dfTotal = df.total || 32768;
@@ -714,6 +767,71 @@
           }
           setDfDetail(df);
           updateExtraction();
+          applyGates();
+        } catch (err) { /* polling failure */ }
+      }
+
+      // --- Preflight ---
+
+      // Two gates, from two different facts. The dump rows wait on preflight having
+      // PASSED, not merely having run: a run that dies at the programming session
+      // still stores a route, and unlocking on that spends an owner's car session on
+      // attempts whose outcome the report already printed. The unlock rows wait on the
+      // ECU not having rejected a key, which is the only state where sending another
+      // one is the wrong move.
+      function applyGates() {
+        const locked = !state.preflightPassed || state.preflightBlocked;
+        for (const key of RANGE_PROFILES) {
+          const row = document.getElementById("rangeRow-" + key);
+          if (row) row.classList.toggle("locked", locked);
+        }
+        for (const id of UNLOCK_ROWS) {
+          const row = document.getElementById(id);
+          if (row) row.classList.toggle("locked", state.preflightBlocked);
+        }
+        for (const id of PREFLIGHT_GATED_ROWS) {
+          const row = document.getElementById(id);
+          if (row) row.classList.toggle("locked", locked);
+        }
+        // Both file actions 409 while a panda job runs, so the page matches the server
+        // rather than offering a tap that is refused.
+        els.downloadBtn.classList.toggle("locked", state.jobRunning);
+        els.deleteBtn.classList.toggle("locked", state.jobRunning);
+      }
+
+      async function loadPreflightStatus() {
+        try {
+          const pf = await fetchJson("/api/preflight-status");
+          state.preflightPassed = !!pf.passed;
+          state.preflightBlocked = !!pf.blocked;
+          state.pfRunning = pf.status === "running";
+          const dot = document.getElementById("preflightDot");
+          const detail = document.getElementById("preflightDetail");
+          const report = pf.report || {};
+          if (pf.status === "running") {
+            dot.className = "prereq-dot";
+            detail.style.color = "#8e8e93";
+            detail.textContent = "Running…";
+          } else if (state.preflightBlocked) {
+            dot.className = "prereq-dot";
+            detail.style.color = "#ff3b30";
+            detail.textContent = "This ECU rejected a key. No more keys will be sent.";
+          } else if (report.result) {
+            dot.className = pf.passed
+              ? "prereq-dot ready" : "prereq-dot warn";
+            detail.style.color = "";
+            let line = report.result;
+            if (pf.route && pf.route.bus !== undefined) {
+              line += `\nbus ${pf.route.bus}, param ${pf.route.param}`;
+            }
+            detail.style.whiteSpace = "pre-line";
+            detail.textContent = line;
+          } else {
+            dot.className = "prereq-dot";
+            detail.style.color = "";
+            detail.textContent = "Not run yet";
+          }
+          applyGates();
         } catch (err) { /* polling failure */ }
       }
 
@@ -725,6 +843,7 @@
       async function loadRangeStatus() {
         try {
           const payload = await fetchJson("/api/range-status");
+          state.rangeRunning = (payload.profiles || []).some(p => p.status === "running");
           for (const p of payload.profiles || []) {
             const dot = document.getElementById("rangeDot-" + p.profile);
             const detail = document.getElementById("rangeDetail-" + p.profile);
@@ -755,12 +874,14 @@
               detail.textContent = range;
             }
           }
+          applyGates();
         } catch (err) { /* polling failure */ }
       }
 
       async function refreshState() {
         await Promise.all([
           loadStatus(),
+          loadPreflightStatus(),
           loadExtractionStatus(),
           loadRangeStatus(),
           loadRebootActions(),
@@ -787,6 +908,32 @@
           if (!response.ok) {
             showAlert(result.title || "Uninstall failed", responseBody(result));
           }
+        } catch (err) {
+          showAlert("Unexpected error", String(err));
+        }
+      }
+
+      // --- Delete dumps ---
+
+      els.deleteBtn.addEventListener("click", () => {
+        if (state.running || state.jobRunning) return;
+        showModal("Delete dumps?",
+          "Deletes every dump, CAN capture, preflight report and the security access "
+          + "log.\nThe installed key is not touched.", [
+          { label: "Cancel", className: "cancel", onClick: hideModal },
+          { label: "Delete", className: "confirm-danger", onClick: doDeleteDumps },
+        ]);
+      });
+
+      async function doDeleteDumps() {
+        hideModal();
+        try {
+          const { response, result } = await postJson("/api/delete-dumps", {});
+          if (!response.ok) {
+            showAlert("Can't delete", result.message || "Delete failed.");
+            return;
+          }
+          await refreshState();
         } catch (err) {
           showAlert("Unexpected error", String(err));
         }

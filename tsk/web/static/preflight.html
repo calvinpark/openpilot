@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Preflight</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        min-height: 100vh;
+      }
+
+      .page {
+        width: min(100vw, 460px);
+        margin: 0 auto;
+        padding: 0 0 24px;
+      }
+
+      .back-bar { padding: 12px 20px; }
+
+      .back-link {
+        color: #007aff;
+        font-size: 17px;
+        text-decoration: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .back-link::before { content: "‹ "; }
+
+      .page-header { padding: 0 20px 12px; }
+      .page-title { font-size: 28px; font-weight: 700; }
+
+      .section-label {
+        margin: 20px 16px 6px 20px;
+        font-size: 13px;
+        font-weight: 400;
+        color: #6d6d72;
+        text-transform: uppercase;
+      }
+
+      .group {
+        margin: 0 16px;
+        background: #fff;
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      .group-item {
+        display: block;
+        width: 100%;
+        padding: 12px 16px;
+        border: none;
+        border-bottom: 0.5px solid #c6c6c8;
+        background: #fff;
+        color: #1c1c1e;
+        text-align: left;
+        text-decoration: none;
+        font: inherit;
+        font-size: 17px;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .group-item:last-child { border-bottom: none; }
+      .group-item:active { background: #e5e5ea; }
+      .group-item.action { color: #007aff; }
+      .group-item.danger { color: #ff3b30; }
+
+      .group-item.disabled {
+        color: #c7c7cc;
+        cursor: default;
+        pointer-events: none;
+      }
+
+      /* --- Screenshot block: pinned, updated on every poll --- */
+
+      .shot {
+        margin: 0 16px;
+        background: #fff;
+        border-radius: 12px;
+        padding: 14px 16px;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 13px;
+        line-height: 1.5;
+        white-space: pre;
+        overflow-x: auto;
+      }
+
+      /* --- Live log --- */
+
+      .terminal {
+        margin: 0 16px;
+        background: #1c1c1e;
+        border-radius: 12px;
+        padding: 16px;
+        min-height: 160px;
+        max-height: 45vh;
+        overflow-y: auto;
+        overflow-x: hidden;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #e5e5ea;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .terminal .err { color: #ff453a; }
+      .terminal .ok { color: #30d158; }
+      .terminal .dim { color: #8e8e93; }
+
+      .start-btn {
+        display: block;
+        width: calc(100% - 32px);
+        margin: 0 16px;
+        padding: 14px;
+        border: none;
+        border-radius: 12px;
+        background: #007aff;
+        color: #fff;
+        font-size: 17px;
+        font-weight: 600;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .start-btn:disabled { background: #c7c7cc; color: #8e8e93; }
+
+      .copybox {
+        width: calc(100% - 32px);
+        margin: 0 16px;
+        height: 120px;
+        border: 0.5px solid #c6c6c8;
+        border-radius: 12px;
+        padding: 10px;
+        font-family: "SF Mono", ui-monospace, monospace;
+        font-size: 12px;
+        color: #1c1c1e;
+        background: #fff;
+        resize: vertical;
+      }
+
+      /* --- Modal --- */
+
+      .modal-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.4);
+        z-index: 100;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      }
+
+      .modal-overlay.visible { display: flex; }
+
+      .modal {
+        background: #fff;
+        border-radius: 14px;
+        width: min(100%, 300px);
+        overflow: hidden;
+      }
+
+      .modal-content { padding: 20px 16px; }
+      .modal-title { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+
+      .modal-body {
+        font-size: 13px;
+        color: #8e8e93;
+        line-height: 1.4;
+        white-space: pre-wrap;
+      }
+
+      .modal-buttons { display: flex; border-top: 0.5px solid #c6c6c8; }
+
+      .modal-btn {
+        flex: 1;
+        padding: 12px;
+        border: none;
+        background: none;
+        font: inherit;
+        font-size: 17px;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      .modal-btn + .modal-btn { border-left: 0.5px solid #c6c6c8; }
+      .modal-btn.cancel { color: #007aff; }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <div class="back-bar">
+        <a class="back-link" href="/">TSK Manager</a>
+      </div>
+      <header class="page-header">
+        <div class="page-title">Preflight</div>
+      </header>
+
+      <div class="section-label">Result</div>
+      <div class="shot" id="shot">Preflight has not run yet.</div>
+
+      <div style="margin-top: 16px;">
+        <button class="start-btn" id="startBtn" type="button">Run preflight</button>
+      </div>
+
+      <div class="section-label">Live log</div>
+      <div class="terminal" id="terminal"></div>
+
+      <div class="section-label">Copy as text</div>
+      <textarea class="copybox" id="copybox" readonly></textarea>
+    </main>
+
+    <div class="modal-overlay" id="modalOverlay">
+      <div class="modal">
+        <div class="modal-content">
+          <div class="modal-title" id="modalTitle"></div>
+          <div class="modal-body" id="modalBody"></div>
+        </div>
+        <div class="modal-buttons" id="modalButtons"></div>
+      </div>
+    </div>
+
+    <script>
+      // Tap-to-run, never auto-run: this press sends a security key, and arriving on
+      // the page must not send one.
+      const els = {
+        shot: document.getElementById("shot"),
+        terminal: document.getElementById("terminal"),
+        startBtn: document.getElementById("startBtn"),
+        copybox: document.getElementById("copybox"),
+        modalOverlay: document.getElementById("modalOverlay"),
+        modalTitle: document.getElementById("modalTitle"),
+        modalBody: document.getElementById("modalBody"),
+        modalButtons: document.getElementById("modalButtons"),
+      };
+
+      let logLines = 0;
+      let running = false;
+
+      function setLog(lines) {
+        // A shorter list than last time means the log was reset (a new run, or a
+        // delete), so start the block over rather than appending onto stale lines.
+        if (lines.length < logLines) {
+          els.terminal.innerHTML = "";
+          logLines = 0;
+        }
+        // Append-only otherwise: rewriting the whole block every second would fight
+        // the scroll position while a run is producing output.
+        for (let i = logLines; i < lines.length; i++) {
+          const span = document.createElement("span");
+          const line = lines[i];
+          if (/silent|NRC|failed|Error|error/.test(line)) span.className = "err";
+          else if (/opened|accepted|received|complete/.test(line)) span.className = "ok";
+          span.textContent = line + "\n";
+          els.terminal.appendChild(span);
+        }
+        if (lines.length !== logLines) {
+          logLines = lines.length;
+          els.terminal.scrollTop = els.terminal.scrollHeight;
+        }
+      }
+
+      function render(state) {
+        els.shot.textContent = state.screenshot || "Preflight has not run yet.";
+        els.copybox.value = state.screenshot || "";
+        setLog(state.log || []);
+
+        running = state.status === "running";
+        els.startBtn.disabled = running;
+        els.startBtn.textContent = running
+          ? "Running…"
+          : (state.has_run ? "Run preflight again" : "Run preflight");
+      }
+
+      async function getStatus() {
+        const response = await fetch("/api/preflight-status", { cache: "no-store" });
+        return response.json();
+      }
+
+      async function postJson(url, payload) {
+        const response = await fetch(url, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload || {}),
+        });
+        return { response, result: await response.json() };
+      }
+
+      // --- Modal ---
+
+      function showModal(title, body, buttons) {
+        els.modalTitle.textContent = title;
+        els.modalBody.textContent = body;
+        els.modalButtons.innerHTML = "";
+        for (const b of buttons) {
+          const btn = document.createElement("button");
+          btn.className = "modal-btn " + (b.className || "");
+          btn.textContent = b.label;
+          btn.addEventListener("click", b.onClick);
+          els.modalButtons.appendChild(btn);
+        }
+        els.modalOverlay.classList.add("visible");
+      }
+
+      function hideModal() {
+        els.modalOverlay.classList.remove("visible");
+      }
+
+      function showAlert(title, body) {
+        showModal(title, body, [{ label: "OK", className: "cancel", onClick: hideModal }]);
+      }
+
+      // --- Actions ---
+
+      els.startBtn.addEventListener("click", async () => {
+        if (running) return;
+        els.startBtn.disabled = true;
+        els.startBtn.textContent = "Running…";
+        els.terminal.innerHTML = "";
+        logLines = 0;
+        try {
+          const { response, result } = await postJson("/api/preflight");
+          if (!response.ok) {
+            showAlert("Can't start", result.message || "Preflight did not start.");
+            els.startBtn.disabled = false;
+            return;
+          }
+        } catch (err) {
+          showAlert("Unexpected error", String(err));
+          els.startBtn.disabled = false;
+        }
+      });
+
+      // --- Polling ---
+
+      async function poll() {
+        try {
+          render(await getStatus());
+        } catch (err) { /* transient poll failure, keep the loop alive */ }
+      }
+
+      poll();
+      setInterval(poll, 1000);
+    </script>
+  </body>
+</html>
